@@ -50,6 +50,25 @@ const (
 	defaultAgentHome            = "/opt/data"
 	defaultStorageSize          = "5Gi"
 	credentialProxyPort         = 8765
+
+	// sandboxUID is the canonical unprivileged 'hermes' runtime user created in
+	// the upstream NousResearch/hermes-agent Dockerfile (line 92). Everything the
+	// agent image ships is owned by it, so the sandbox cannot run as anything else.
+	sandboxUID = int64(10000)
+	// credentialProxyUID keeps the credential sidecar off the sandbox's user. The
+	// sidecar holds every credential in the Pod; a distinct UID means a sandbox
+	// process cannot reach the sidecar's process state or its files by identity
+	// alone, only through the proxy's own policy-checked API.
+	credentialProxyUID = int64(10001)
+	// agentFSGroup is the group both containers share. They mount one PVC and each
+	// writes files the other has to change — the sandbox creates a leased GitOps
+	// directory that the sidecar clones into, and the sidecar writes kubeconfig
+	// pins into profile homes the sandbox created — so shared-group write access
+	// is what the split UIDs must not take away. fsGroup makes the kubelet
+	// group-own the volumes and set setgid on their directories; the two
+	// entrypoints run with umask 0002 so files created after mount stay
+	// group-writable.
+	agentFSGroup = int64(10000)
 )
 
 // getDefaultStorageConfig returns the access modes and storage class name based on the replica count and user configuration.
@@ -1099,8 +1118,6 @@ func buildCustomStorageVolumes(agent *agentv1alpha1.PlatformAgent) []corev1.Volu
 func buildPodTemplateSpec(agent *agentv1alpha1.PlatformAgent, configHash, fluentBitHash, settingsConfigHash, policyHash string, agentPlugins []*agentv1alpha1.AgentPlugin, isImageVolumeSupported bool) corev1.PodTemplateSpec {
 	agentPlugins = filterValidAgentPlugins(agentPlugins)
 	replicas, _ := resolveDeploymentReplicasAndStrategy(agent.Spec.Deployment)
-	// UID/GID 10000 matches the canonical unprivileged 'hermes' runtime user created in NousResearch/hermes-agent upstream Dockerfile
-	fsGroup := int64(10000)
 
 	saName := agent.Name
 	if agent.Spec.Security != nil && agent.Spec.Security.ServiceAccountName != "" {
@@ -1332,13 +1349,6 @@ func buildPodTemplateSpec(agent *agentv1alpha1.PlatformAgent, configHash, fluent
 		Value: "/opt/defaults/scripts",
 	})
 
-	dashboardEnabled := isDashboardEnabled(agent)
-
-	var shareProcessNamespace *bool
-	if dashboardEnabled {
-		shareProcessNamespace = ptr.To(true)
-	}
-
 	var runtimeClassName *string
 	if agent.Spec.Deployment != nil && agent.Spec.Deployment.Availability != nil {
 		runtimeClassName = agent.Spec.Deployment.Availability.RuntimeClassName
@@ -1410,19 +1420,24 @@ func buildPodTemplateSpec(agent *agentv1alpha1.PlatformAgent, configHash, fluent
 
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
-			Labels: podLabels,
+			Labels:      podLabels,
 			Annotations: mergeAnnotations(defaultAnnotations, podAnnotations),
 		},
 		Spec: corev1.PodSpec{
-			ShareProcessNamespace:        shareProcessNamespace,
+			// No ShareProcessNamespace. The sandbox and the credential sidecar are
+			// in one Pod, so a shared process namespace would put the sidecar's
+			// /proc/<pid>/environ — where its credentials live — inside a directory
+			// the sandbox can read. See docs/security-requirements.md.
 			RuntimeClassName:             runtimeClassName,
 			InitContainers:               initContainers,
 			ServiceAccountName:           saName,
 			AutomountServiceAccountToken: ptr.To(false),
 			SecurityContext: &corev1.PodSecurityContext{
-				FSGroup: &fsGroup,
-				// UID 10000 matches canonical 'hermes' runtime user in upstream image (NousResearch/hermes-agent Dockerfile line 92)
-				RunAsUser:      ptr.To(int64(10000)),
+				FSGroup: ptr.To(agentFSGroup),
+				// The Pod default is the sandbox's user; the credential sidecar
+				// overrides it with credentialProxyUID at container level.
+				RunAsUser:      ptr.To(sandboxUID),
+				RunAsGroup:     ptr.To(agentFSGroup),
 				RunAsNonRoot:   ptr.To(true),
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			},
@@ -1632,6 +1647,11 @@ func buildCredentialProxySidecar(agent *agentv1alpha1.PlatformAgent, homeDir str
 			{Name: "platform-agent-data-vol", MountPath: homeDir},
 		},
 		SecurityContext: &corev1.SecurityContext{
+			// A user of its own, not the sandbox's. The shared PVC still works
+			// across the two because both containers keep agentFSGroup (see the
+			// constant) and write group-readable/writable files.
+			RunAsUser:                ptr.To(credentialProxyUID),
+			RunAsGroup:               ptr.To(agentFSGroup),
 			AllowPrivilegeEscalation: ptr.To(false), ReadOnlyRootFilesystem: ptr.To(true), Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 		},
 	}

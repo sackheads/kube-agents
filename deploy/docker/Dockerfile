@@ -252,6 +252,16 @@ FROM platform AS credential-proxy
 
 USER root
 
+# The Pod runs this container as UID 10001 — not the sandbox's 10000 — so the two
+# containers do not share a user (see the UID constants in the operator's
+# platformagent_manifests.go). An unknown UID is a passwd lookup that fails, and
+# gcloud, gh and git all do one; give the UID a name here rather than debug it
+# later. The group stays hermes (GID 10000): both containers mount the agent PVC
+# and each has to be able to write what the other created there.
+RUN getent group 10000 >/dev/null || groupadd --gid 10000 hermes; \
+    useradd --no-log-init --no-create-home --uid 10001 --gid 10000 \
+      --home-dir /tmp/credential-proxy --shell /usr/sbin/nologin credential-proxy
+
 COPY --from=envoy-bin /usr/local/bin/envoy /usr/local/bin/envoy
 RUN mkdir -p /etc/envoy
 COPY --chmod=0644 deploy/shared/envoy-credential-proxy.yaml /etc/envoy/envoy-credential-proxy.yaml
