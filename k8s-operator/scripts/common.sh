@@ -233,12 +233,27 @@ init_var_model_provider() {
   init_var "MODEL_DEFAULT_NAME" "$DEFAULT_MODEL" "Enter Model Default Name"
 }
 
+# The permission set the agent GSA is granted. `gke-admin` was removed: it did
+# not merely widen the ceiling, it removed one. GKE authorizes on the UNION of
+# IAM and Kubernetes RBAC, so a GSA holding roles/container.admin is authorized
+# by IAM no matter how narrow the KSA's RBAC is — and roles/container.admin
+# carries container.clusters.impersonate, which IAM cannot scope with
+# resourceNames, so granting it is unbounded impersonation of any principal on
+# any cluster in the project. An operator who genuinely needs broad roles uses
+# `custom` and lists them, which makes the grant explicit and reviewable
+# instead of hiding it behind one word.
 init_var_platform_agent_permission_set() {
-  init_var "PLATFORM_AGENT_PERMISSION_SET" "read-only" "Enter Platform Agent Permission Set (read-only, gke-admin, custom)"
+  init_var "PLATFORM_AGENT_PERMISSION_SET" "read-only" "Enter Platform Agent Permission Set (read-only, custom)"
 
   PLATFORM_AGENT_PERMISSION_SET=$(echo "$PLATFORM_AGENT_PERMISSION_SET" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-  if [[ ! "$PLATFORM_AGENT_PERMISSION_SET" =~ ^(read-only|gke-admin|custom)$ ]]; then
-    print_error "Invalid Platform Agent Permission Set '$PLATFORM_AGENT_PERMISSION_SET'. Must be one of: read-only, gke-admin, custom."
+  if [ "$PLATFORM_AGENT_PERMISSION_SET" = "gke-admin" ]; then
+    # Named separately from the generic error so a cached vars.sh from before
+    # the removal fails with an explanation rather than a bare "invalid".
+    print_error "The 'gke-admin' permission set has been removed: roles/container.admin authorizes the agent through IAM regardless of its Kubernetes RBAC, and its container.clusters.impersonate permission cannot be scoped by IAM. Use 'read-only', or 'custom' with PLATFORM_AGENT_CUSTOM_ROLES if you accept that risk explicitly."
+    exit 1
+  fi
+  if [[ ! "$PLATFORM_AGENT_PERMISSION_SET" =~ ^(read-only|custom)$ ]]; then
+    print_error "Invalid Platform Agent Permission Set '$PLATFORM_AGENT_PERMISSION_SET'. Must be one of: read-only, custom."
     exit 1
   fi
 
