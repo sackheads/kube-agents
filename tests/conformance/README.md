@@ -222,10 +222,10 @@ refuse the ambiguous form rather than normalising it.
 
 ## Mutation results
 
-Every test was verified by deleting or weakening the control it tests and
-confirming the suite goes red. If deleting the control leaves the suite green,
-the test does not exist — slice 2a shipped a whole gate that could be deleted
-with its suite byte-identical, and only a dedicated task caught it.
+Every assertion here is verified by deleting or weakening the control it tests
+and confirming the suite goes red. If deleting the control leaves the suite
+green, the test does not exist — slice 2a shipped a whole gate that could be
+deleted with its suite byte-identical, and only a dedicated task caught it.
 
 `hack/conformance-mutations.py` is how that is checked, and re-running it is
 how it stays true:
@@ -236,11 +236,33 @@ python3 hack/conformance-mutations.py --list
 python3 hack/conformance-mutations.py -k C1    # substring filter on the id
 ```
 
-43 mutations at the time of writing: 42 caught, one deliberately harmless as a
-control on the harness itself, zero genuine survivors. Each names the control
+74 mutations: 55 KILLED, 18 NOISY, one deliberately harmless as a control on
+the harness itself, zero genuine survivors, zero stale. Each names the control
 it removes, the test that must notice, and the plausible bad change it
 imitates. It is not run in CI — it edits tracked files in place — so it is a
 thing to run when adding a test, which step 4 below says to do.
+
+**The coverage of that set is checked by the suite, because it rotted once.**
+The first version of this file claimed every test had been mutation-verified
+while 29 passing assertions were named by no mutation at all. A manual harness
+outside CI is exactly the thing that drifts, so
+`test_every_bucket_one_assertion_is_named_by_a_mutation` reads the mutation set
+out of the harness's AST and fails when an assertion is attacked by nothing.
+Two exemptions, both principled and both enforced rather than conventional:
+a known violation has no control to delete and is verified by its precondition
+pair instead, and one assertion — that `::ffff:0.0.0.0/96` unmaps to
+`0.0.0.0/0` — reads no repository artifact, so any edit that reddens it is an
+edit to the assertion. That check is a floor, not a proof: it knows a mutation
+exists, not that the mutation removes the right thing.
+
+**Restoring the tree is not the same as restoring the suite.** A mutation that
+renames a symbol to another of the same length leaves the file size unchanged;
+restore it with `git checkout` inside the same second and CPython's
+mtime-plus-size check cannot distinguish the cached bytecode compiled from the
+mutated source, and keeps using it. That happened, and nine verdicts in the
+first full run were collateral from a leak rather than from any mutation. The
+harness now runs with `-B`, purges `.pyc` before each run, and re-runs the
+suite once at the end: a run that ends red says so and exits non-zero.
 
 ## Adding a test
 
@@ -250,7 +272,9 @@ thing to run when adding a test, which step 4 below says to do.
    `test_harness_selfcheck.py` reads that prefix to check coverage.
 3. Assert the _refusal_, never the presence of the control. Twice in this
    project an object's existence has been mistaken for its enforcement.
-4. Mutate the control and confirm your test goes red. Record it.
+4. Add a mutation that removes the control, confirm your test goes red, and
+   record the verdict. This is not optional and not on the honour system —
+   the suite fails until the mutation exists.
 5. If it fails against current code, decorate it `@known_violation` with the
    invariant and the document that records the finding — and give its class a
    `..._precondition_...` test, which the self-check requires.
