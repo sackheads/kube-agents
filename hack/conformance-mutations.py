@@ -122,6 +122,77 @@ MUTATIONS: list[Mutation] = [
         "remove the resourceNames bound on `bind`, so the operator can attach "
         "any existing ClusterRole to an agent",
     ),
+    Mutation(
+        "A1-refusal-emptied",
+        "agents/platform/scripts/command_policy.py",
+        ('                message=(\n'
+         '                    "Identity and API server address belong to the broker. Remove "\n'
+         '                    "--server, --token, --user, --client-certificate, "\n'
+         '                    "--insecure-skip-tls-verify and the other credential flags to "\n'
+         '                    "use the cluster and identity the proxy configured."\n'
+         '                ),\n',
+         '                message="",\n'),
+        "test_A1_a_refusal_names_the_rule_that_fired",
+        "collapse a refusal onto its rule id -- the cheapest way to satisfy "
+        "A1's no-caller-supplied-byte bound is to stop saying anything, and an "
+        "agent handed an empty body cannot tell policy from an unreachable "
+        "cluster",
+    ),
+    Mutation(
+        "A3-gcloud-flags-file",
+        "agents/platform/scripts/command_policy.py",
+        ('        if name == "--flags-file":\n            return "--flags-file"\n',
+         '        if name == "--flags-file-disabled":\n            return "--flags-file"\n'),
+        "test_A3_rejects_gcloud_flags_file",
+        "neuter the dedicated flags-file check the way A3-kuberc does. Unlike "
+        "--kuberc there is no second guard: the command survives only because "
+        "the flag's arity is unknown, so it is refused for the wrong reason and "
+        "becomes allowed the day _GCLOUD_FLAGS_WITH_VALUE learns about it",
+    ),
+    Mutation(
+        "A3-attached-shorthand-overreach",
+        "agents/platform/scripts/command_policy.py",
+        ('        if token.startswith("-s") and token != "-s":\n            return "-s"\n',
+         '        if token.startswith("-") and token.lstrip("-").startswith("s") '
+         'and token != "-s":\n            return "-s"\n'),
+        "test_A3_the_attached_shorthand_rule_does_not_overreach",
+        "the looser spelling the docstring warns against -- strip the dashes, "
+        "test for a leading s. Every -sVALUE is still refused, so the shorthand "
+        "test stays green while --sort-by, --since and --selector become "
+        "refusals, which is how a control gets switched off in production",
+    ),
+    Mutation(
+        "A4-chart-bind-unpinned",
+        "charts/kube-agents/templates/operator-rbac.yaml",
+        ("  - apiGroups:\n      - rbac.authorization.k8s.io\n    resourceNames:\n"
+         "      - view\n    resources:\n      - clusterroles\n    verbs:\n      - bind\n",
+         "  - apiGroups:\n      - rbac.authorization.k8s.io\n    resources:\n"
+         "      - clusterroles\n    verbs:\n      - bind\n"),
+        "test_A4_the_chart_grants_the_same_ceiling_as_the_kustomize_role",
+        "the chart twin of A4-operator-escalate, hand-edited inside the "
+        "generated block instead of regenerated: the kustomize role still reads "
+        "correct and only Helm installs get an unrestricted bind",
+    ),
+    Mutation(
+        "A4-inject-assertion-renamed",
+        "tests/conformance/test_A_authority.py",
+        ("    def test_A3_the_session_inject_endpoint_authenticates_its_caller(self) -> None:",
+         "    def test_A3_the_inject_endpoint_authenticates_its_caller(self) -> None:"),
+        "test_A4_triggering_is_covered_by_the_A3_inject_finding",
+        "shorten an over-long test name in a tidy-up. A4's triggering clause has "
+        "no assertion of its own -- it looks its coverage up by qualname -- so a "
+        "rename uncovers the invariant without deleting a line of assertion",
+    ),
+    Mutation(
+        "A2-ceiling-test-renamed",
+        "tests/conformance/test_C_enforcement.py",
+        ("    def test_C5_no_minted_role_grants_a_write_verb(self) -> None:",
+         "    def test_C5_no_minted_role_grants_write_verbs(self) -> None:"),
+        "test_A2_the_agent_ceiling_half_of_the_intersection_is_asserted",
+        "rename the minted-RBAC ceiling test. A2 has no mechanism of its own to "
+        "assert, so it borrows C5's assertion by name; the borrow is what breaks "
+        "first, and it has to break loudly or A2 falls off the map",
+    ),
     # ---- B. The write path ----------------------------------------------
     Mutation(
         "B1-read-only-verbs",
@@ -189,6 +260,73 @@ MUTATIONS: list[Mutation] = [
         "test_B6_the_gitops_template_names_no_automation_identity",
         "name an automation identity as a code owner, defeating the one rule "
         "a GitHub App cannot satisfy",
+    ),
+    Mutation(
+        "B1-read-path-narrowed",
+        "agents/platform/scripts/command_policy.py",
+        ('        # Writes a kubeconfig in the sidecar and nothing in the cloud. It is\n'
+         '        # also how a Cluster Agent points itself at its target cluster, so\n'
+         '        # refusing it would break the read path this module is protecting.\n'
+         '        ("container", "clusters", "get-credentials"),\n',
+         ""),
+        "test_B1_ordinary_reads_still_work",
+        "harden the allowlist by dropping the one entry with `credentials` in "
+        "its name. The over-strict direction, which costs an operator the whole "
+        "posture rather than one command -- the gate that gets globally "
+        "disabled a week later",
+    ),
+    Mutation(
+        "B1-gcloud-group-prefix",
+        "agents/platform/scripts/command_policy.py",
+        ('        ("container", "node-pools", "describe"),\n'
+         '        ("container", "node-pools", "list"),\n',
+         '        ("container", "node-pools"),\n'),
+        "test_B1_gcloud_write_commands_are_refused",
+        "collapse two adjacent entries onto their common prefix while tidying "
+        "the list -- _gcloud_is_read_only matches on prefix, so the group entry "
+        "allows every verb beneath it, `delete` included",
+    ),
+    Mutation(
+        "B2-second-pull-requests-write",
+        ".github/workflows/conformance.yml",
+        ("permissions:\n  contents: read\n\njobs:\n  conformance:\n",
+         "permissions:\n  contents: read\n  pull-requests: write\n\njobs:\n  conformance:\n"),
+        "test_B2_no_workflow_grants_a_bot_the_ability_to_approve",
+        "let the conformance job post its findings as a pull-request comment. "
+        "The scope that buys a comment is the scope that buys an approval, on a "
+        "workflow that runs on every pull_request",
+    ),
+    Mutation(
+        "B3-apply-read-verb",
+        "agents/platform/scripts/command_policy.py",
+        ('        ("get",),\n', '        ("apply",),\n        ("get",),\n'),
+        "test_B3_the_agent_cannot_reach_the_admission_policy_through_kubectl",
+        "add apply so a manifest-generation skill can preview with "
+        "--dry-run=server. The verb is allowed whatever follows it, and what "
+        "follows it here is the ClusterRoleBinding that grants the agent write. "
+        "NOISY against B1 by construction: B3's corpus is refused by the same "
+        "verb allowlist, with no resource-aware layer between them",
+    ),
+    Mutation(
+        "B4-fourth-contents-write-holder",
+        ".github/workflows/chart-release.yml",
+        ("      contents: read\n      packages: write\n",
+         "      contents: write\n      packages: write\n"),
+        "test_B4_contents_write_is_confined_to_the_release_path",
+        "give the chart publisher contents: write so it can cut a GitHub "
+        "release alongside the OCI push -- a fourth holder of the credential "
+        "that can push to this repository, added in a one-word diff",
+    ),
+    Mutation(
+        "B6-guarded-path-unowned",
+        "examples/gitops-repo/CODEOWNERS.example",
+        ("\n# Admission policies (the security backstop itself)\n"
+         "/policy/                          @your-org/security\n",
+         "\n"),
+        "test_B6_every_guarded_path_in_the_template_has_an_owner",
+        "drop the rule for the one directory nobody edits often, so the ruleset "
+        "requiring code-owner review on /policy/ requires review from nobody "
+        "and the admission backstop merges unreviewed",
     ),
     # ---- C. Enforcement --------------------------------------------------
     Mutation(
@@ -353,6 +491,121 @@ MUTATIONS: list[Mutation] = [
         "test_C5_the_admission_policy_fails_closed",
         "the one-line edit B3 names: 'unblock apply during upgrade window'",
     ),
+    Mutation(
+        "C1-sandbox-back-in-the-broker-pod",
+        "k8s-operator/internal/testing/testdata/platform/expected/platformagent-split-broker.yaml",
+        ("      containers:\n        - command:\n"
+         "            - /usr/local/bin/envoy-credential-sidecar\n",
+         "      containers:\n"
+         "        - image: ghcr.io/gke-labs/kube-agents/platform-agent:v9.9.9\n"
+         "          imagePullPolicy: IfNotPresent\n"
+         "          name: platform-agent\n"
+         "          securityContext:\n"
+         "            allowPrivilegeEscalation: false\n"
+         "            readOnlyRootFilesystem: true\n"
+         "            runAsUser: 10000\n"
+         "        - command:\n"
+         "            - /usr/local/bin/envoy-credential-sidecar\n"),
+        "test_C1_the_split_broker_pod_holds_no_sandbox_container",
+        "a golden fixture regenerated after the sandbox was co-located back "
+        "into the broker Pod to share the workspace over localhost. Distinct "
+        "UIDs are kept, so every UID assertion still passes and only the "
+        "network namespace the split exists to separate is shared again",
+    ),
+    Mutation(
+        "C2-phase-two-skips-unknown-flag",
+        "agents/platform/scripts/command_policy.py",
+        ("            # Stop on unknown flags (arity unknown, could hide the subcommand).\n"
+         "            if name not in _KUBECTL_FLAGS_WITH_VALUE and name not in _KUBECTL_BOOLEAN_FLAGS:\n"
+         "                break\n",
+         "            # Unknown command-specific flags are boolean far more often\n"
+         "            # than not, so skip rather than stop.\n"
+         "            if name not in _KUBECTL_FLAGS_WITH_VALUE and name not in _KUBECTL_BOOLEAN_FLAGS:\n"
+         "                index += 1\n"
+         "                continue\n"),
+        "test_C2_an_unknown_flag_cannot_swallow_a_write_subcommand",
+        "make phase 2 skip an unrecognised command-specific flag instead of "
+        "stopping at it -- the symmetry a reader expects with phase 1's loop. "
+        "`rollout --someflag status restart web` then reads as `rollout status`",
+    ),
+    Mutation(
+        "C2-cluster-info-dump-allowed",
+        "agents/platform/scripts/command_policy.py",
+        ('        ("cluster-info", "dump"),\n', ""),
+        "test_C2_cluster_info_dump_is_refused_by_both_of_its_guards",
+        "empty the refused-subcommand set on the grounds that a dump only "
+        "reads. `cluster-info` is allowed alone and evaluate falls back to "
+        "verb[:1], so the deletion is silent",
+    ),
+    Mutation(
+        "C2-output-directory-demoted",
+        "agents/platform/scripts/command_policy.py",
+        ('        "--profile", "--profile-output", "--cache-dir", "--output-directory",\n',
+         '        "--profile", "--profile-output", "--cache-dir",\n'),
+        "test_C2_cluster_info_dump_is_refused_by_both_of_its_guards",
+        "drop --output-directory from a set of kubectl *global* flags because "
+        "it belongs to cluster-info -- exactly the tidy-up the comment above it "
+        "argues against, and the guard that does not need the verb parse. The "
+        "pair with C2-cluster-info-dump-allowed: the test names two guards, so "
+        "each is removed on its own",
+    ),
+    Mutation(
+        "C3-policy-opens-the-kuberc-file",
+        "agents/platform/scripts/command_policy.py",
+        ('    for token in argv[1:]:\n        name, _, _ = token.partition("=")\n'
+         '        if name == "--kuberc":\n            return "--kuberc"\n',
+         '    import codecs\n\n'
+         '    for token in argv[1:]:\n        name, _, value = token.partition("=")\n'
+         '        if name == "--kuberc":\n'
+         '            if value:\n'
+         '                try:\n'
+         '                    with codecs.open(value, encoding="utf-8") as preference:\n'
+         '                        if "as" not in preference.read():\n'
+         '                            return None\n'
+         '                except OSError:\n'
+         '                    pass\n'
+         '            return "--kuberc"\n'),
+        "test_C3_the_policy_decision_reads_nothing_but_its_argv",
+        "refuse --kuberc only when the file it names actually sets an "
+        "impersonation default -- the same helpful-looking check as "
+        "C3-policy-reads-a-file, spelled through codecs.open so neither the AST "
+        "test's import list nor its builtin-name list is touched. os.stat is "
+        "the audit hook's blind spot and an enumerated list is the AST test's; "
+        "this is the half only the hook can see",
+    ),
+    Mutation(
+        "C5-tokenreview-gets-subjectaccessreviews",
+        "k8s-operator/internal/testing/testdata/platform/expected/platformagent-split-broker.yaml",
+        ("    resources:\n      - tokenreviews\n    verbs:\n      - create\n",
+         "    resources:\n      - tokenreviews\n      - subjectaccessreviews\n    verbs:\n      - create\n"),
+        "test_C5_the_tokenreview_role_is_the_narrowest_form_of_itself",
+        "give the broker subjectaccessreviews alongside tokenreviews -- what "
+        "binding system:auth-delegator would have handed it in one line, and an "
+        "authorization oracle over the whole cluster",
+    ),
+    Mutation(
+        "C5-binds-auth-delegator",
+        "k8s-operator/internal/testing/testdata/platform/expected/platformagent-split-broker.yaml",
+        ("roleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: ClusterRole\n"
+         "  name: kubeagents:tokenreview:kubeagents-system:platformagent",
+         "roleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: ClusterRole\n"
+         "  name: system:auth-delegator"),
+        "test_C5_no_agent_binding_names_the_auth_delegator_role",
+        "bind the built-in system:auth-delegator instead of the minted one-verb "
+        "role -- the shortcut every TokenReview how-to recommends. The minted "
+        "role is left in place and still narrow, so the rule-level assertions "
+        "cannot see it",
+    ),
+    Mutation(
+        "C5-leader-reaches-configmaps",
+        "k8s-operator/internal/testing/testdata/platform/expected/platformagent.yaml",
+        ("    resources:\n      - pods\n    verbs:\n      - get\n      - patch\n",
+         "    resources:\n      - configmaps\n      - pods\n    verbs:\n      - get\n      - patch\n"),
+        "test_C5_the_leader_role_stays_confined_to_coordination",
+        "add the ConfigMap lock client-go's configmapsleases mode still "
+        "supports, which turns a coordination role into a namespace read-write "
+        "grant one resource at a time",
+    ),
     # ---- D. Accountability ------------------------------------------------
     Mutation(
         "D1-principal-not-logged",
@@ -402,6 +655,65 @@ MUTATIONS: list[Mutation] = [
         "inline the external key as a literal, the way the loopback sentinel "
         "already is",
     ),
+    Mutation(
+        "D2-read-only-becomes-a-chart-value",
+        "charts/kube-agents/values.yaml",
+        ("    serviceAccountName: kubeagents-platform-agent\n",
+         "    serviceAccountName: kubeagents-platform-agent\n"
+         "    # Sets CREDENTIAL_PROXY_ENFORCE_READ_ONLY on the broker. Set to false\n"
+         "    # to recover from a bad allowlist without waiting on an image build.\n"
+         "    enforceReadOnly: true\n"),
+        "test_D2_the_read_only_posture_is_not_a_customer_facing_knob",
+        "promote the outage stopgap to a documented chart value, which is how a "
+        "global, unscoped, never-expiring autonomy switch actually gets offered "
+        "to a customer -- as a helpful comment next to a boolean",
+    ),
+    Mutation(
+        "D5-cross-reference-renamed",
+        "tests/conformance/test_C_enforcement.py",
+        ("    def test_C3_the_policy_decision_reads_nothing_but_its_argv(self) -> None:",
+         "    def test_C3_the_policy_decision_is_a_pure_function_of_argv(self) -> None:"),
+        "test_D5_the_enforcement_tier_cannot_be_lowered_by_routing",
+        "shorten an over-long test name. D5 owns no control of its own -- its "
+        "single assertion is a cross-reference to C3's purity test -- so this "
+        "checks the reference is load-bearing rather than decorative, and that "
+        "a rename cannot silently empty the invariant",
+    ),
+    Mutation(
+        "D6-switch-renamed-out-from-under-its-name",
+        "agents/platform/scripts/credential_proxy.py",
+        ('os.getenv("CREDENTIAL_PROXY_ENFORCE_READ_ONLY", "true")',
+         'os.getenv("CREDENTIAL_PROXY_READ_ONLY", "true")'),
+        "test_D6_the_read_only_switch_is_not_mistaken_for_a_kill_switch",
+        "shorten the variable name while tidying. The switch is the only global "
+        "control in the product and D6 exists to say what it does not do; a "
+        "rename means the documented spelling silently does nothing. NOISY "
+        "against C2 by construction -- both invariants read the same call, so "
+        "no edit reaches one without the other",
+    ),
+    Mutation(
+        "D3-bucket-marker-tidied-away",
+        "tests/conformance/test_D_accountability.py",
+        ('"""D3: BUCKET 3 -- no mechanism exists, and a weak test would be worse than none.\n',
+         '"""D3: no mechanism exists, and a weak test would be worse than none.\n'),
+        "test_D3_is_recorded_as_bucket_three_rather_than_missing",
+        "reword a class docstring's opening line, dropping the marker that is "
+        "the only thing distinguishing a recorded bucket-3 reason from an "
+        "invariant nobody wrote a test for. Harness-class: for bucket 3 the "
+        "written reason IS the control, so the suite is the file to mutate",
+    ),
+    Mutation(
+        "D6-bucket-three-exit-criterion-deleted",
+        "tests/conformance/test_D_accountability.py",
+        ("    What would make this bucket 1: a halt control with a stated N. Then the\n"
+         "    assertion is that a halted agent refuses, that the halt survives a restart,\n"
+         "    and that setting it does not require touching the agent's own Deployment.\n",
+         ""),
+        "test_D6_is_recorded_as_bucket_three_rather_than_missing",
+        "delete the forward-looking paragraph as speculative, leaving BUCKET 3 "
+        "a status with no exit criterion -- the shape in which a gap stops "
+        "being a plan and becomes a permanent excuse",
+    ),
     # ---- D15 and the harness ----------------------------------------------
     Mutation(
         "D15-guard-normalises",
@@ -410,6 +722,51 @@ MUTATIONS: list[Mutation] = [
         "test_D15_the_guard_refuses_the_ambiguous_form_rather_than_normalising",
         "swap Overlaps for the Contains that produced the finding -- the same "
         "spelling, the same cross-family blind spot",
+    ),
+    Mutation(
+        "D15-executor-absolute-path",
+        "agents/platform/scripts/credential_proxy.py",
+        ('ALLOWED_EXECUTABLES = ("gcloud", "kubectl", "gh", "git")',
+         'ALLOWED_EXECUTABLES = ("gcloud", "kubectl", "gh", "git", "/usr/bin/kubectl")'),
+        "test_D15_the_two_layers_agree_on_the_governed_tool",
+        "pin kubectl to an absolute path so PATH cannot be shadowed -- a "
+        "hardening on its face, and a spelling _GOVERNED_TOOLS matches exactly "
+        "and therefore does not govern. `/usr/bin/kubectl delete ns prod` reads "
+        "as an ungoverned tool to the policy and as kubectl to the executor",
+    ),
+    Mutation(
+        "D15-kuberc-scan-stops-at-the-verb",
+        "agents/platform/scripts/command_policy.py",
+        ('    for token in argv[1:]:\n        name, _, _ = token.partition("=")\n'
+         '        if name == "--kuberc":\n            return "--kuberc"\n',
+         '    for token in argv[1:]:\n        if not token.startswith("-"):\n            break\n'
+         '        name, _, _ = token.partition("=")\n'
+         '        if name == "--kuberc":\n            return "--kuberc"\n'),
+        "test_D15_a_refused_flag_is_refused_wherever_it_appears",
+        "stop the kuberc scan at the first bare word, reasoning that a global "
+        "flag precedes the verb. cobra does not agree: the post-verb spelling "
+        "falls through to the identity check and earns a different rule id, so "
+        "the verdict now depends on where the flag sits",
+    ),
+    Mutation(
+        "D15-differential-loses-its-test",
+        "tests/conformance/test_A_authority.py",
+        ("    def test_A3_rejects_attached_shorthand_server(self) -> None:",
+         "    def test_A3_rejects_the_attached_shorthand(self) -> None:"),
+        "test_D15_every_known_differential_has_a_test",
+        "rename the -shttp:// test. The checklist looks its findings up by "
+        "string, which is the only way a differential stops being covered "
+        "without a single assertion being deleted",
+    ),
+    Mutation(
+        "D15-readme-closes-the-class",
+        "tests/conformance/README.md",
+        ("**The class is open.** Four instances now across three slices.",
+         "**Four instances now across three slices**, each with a test."),
+        "test_D15_the_readme_says_the_class_is_open",
+        "rewrite the standing hedge as a coverage claim now that all four "
+        "differentials have tests -- the reading the sentence exists to "
+        "prevent, and the one a reader of a finished-looking table takes anyway",
     ),
     Mutation(
         "harness-source-moved",
