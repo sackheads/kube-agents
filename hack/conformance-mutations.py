@@ -55,9 +55,9 @@ class Mutation:
     #: What the mutation is pretending to be: a plausible bad change, not noise.
     pretext: str
     #: True for a mutation that must NOT be caught. A suite that goes red on a
-    #: harmless change is a suite people learn to override, so a couple of
-    #: no-op edits are run as a control on the harness itself: SURVIVED is the
-    #: pass for these and KILLED is the failure.
+    #: harmless change is a suite people learn to override, so a no-op edit is
+    #: run as a control on the harness itself: SURVIVED is the pass for these
+    #: and KILLED is the failure. One today, B1-denylist-rule.
     must_survive: bool = False
 
 
