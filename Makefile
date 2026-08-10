@@ -5,7 +5,7 @@ REPO ?= $(eval REPO := $(LOCATION)-docker.pkg.dev/$(shell gcloud config get core
 
 BAD_SKILLS := $(wildcard agents/*/defaults/skills/*)
 
-.PHONY: default docker-build docker-build-agents docker-build-credential-proxy docker-push docker-push-agents docker-push-credential-proxy dev-rebuild-agent status prettier-check prettier-write test-python validate docs-generate docs-check docs-check-generated docs-check-links docs-check-terminology docs-check-map chart-sync chart-check
+.PHONY: default docker-build docker-build-agents docker-build-credential-proxy docker-push docker-push-agents docker-push-credential-proxy dev-rebuild-agent status prettier-check prettier-write test-python conformance validate docs-generate docs-check docs-check-generated docs-check-links docs-check-terminology docs-check-map chart-sync chart-check
 
 AGENTS := $(notdir $(patsubst %/,%,$(wildcard agents/*/)))
 
@@ -80,6 +80,17 @@ test-python:
 		echo "==> $$dir"; \
 		(cd $$dir && python3 -m unittest discover -p "test_*.py"); \
 	done
+
+# The security invariants, as executable assertions. Deliberately not folded
+# into test-python: that target's globs cover agents/, deploy/docker/patches/
+# and scripts/, not tests/, and a conformance suite whose CI entry depends on
+# someone remembering a glob is a conformance suite that stops running. It has
+# its own workflow (.github/workflows/conformance.yml) for the same reason.
+#
+# Bucket 2 -- the scenarios that need a cluster -- is excluded here rather than
+# skipped, because a skip and a pass look the same in a summary line.
+conformance: ## Run the security invariant conformance suite (bucket 1, no cluster)
+	@python3 tests/conformance/run.py
 
 # Documentation tables that mirror a machine-readable source (cron jobs, the
 # skill catalogue, the provisioning steps) are generated rather than hand-kept.
