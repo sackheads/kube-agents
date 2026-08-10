@@ -268,5 +268,115 @@ class TheSuiteCoversEveryInvariant(unittest.TestCase):
         self.assertEqual(set(_TEST_MODULES), discovered)
 
 
+class EveryAssertionHasBeenAttacked(unittest.TestCase):
+    """A test nobody has tried to break is a test whose existence is a guess.
+
+    `hack/conformance-mutations.py` is what breaks them, and running it is
+    manual -- it edits tracked files in place, so it cannot go in CI. That
+    makes its coverage the thing that rots: 43 mutations named 43 tests while
+    29 passing assertions had none, and the README said every test had been
+    verified. The claim was three years of good intentions and no mechanism.
+
+    This is the mechanism. It reads the mutation set as data and requires a
+    mutation per assertion, which is cheap because a new test that nobody
+    mutated fails here on the same pull request that adds it.
+
+    Two limits, stated rather than discovered later:
+
+    It cannot check that the mutation is a *good* one -- that it removes the
+    control rather than something adjacent to it. Two of the original 43 named
+    a control the test did not actually assert, and only the run itself caught
+    them. So this is a floor, not a proof.
+
+    It walks _TEST_MODULES, which does not include this module, so the
+    self-check does not police its own coverage. That is a real gap and not a
+    clean one to close: several assertions here have no string-replace that
+    removes their control -- falsifying "no test module is left out" means
+    adding a file, not editing one. Four are mutated anyway (the two harness-*
+    entries and the two added with this class); the rest are not.
+    """
+
+    #: Assertions with no in-repo control to remove. Each needs a reason, and
+    #: the reason has to be that mutating it would edit the assertion rather
+    #: than the thing asserted -- not that a mutation was hard to think of.
+    _NO_CONTROL_TO_REMOVE = {
+        "test_D15_the_mapped_prefix_still_denotes_the_whole_ipv4_internet": (
+            "asserts a property of the ipaddress module: that ::ffff:0.0.0.0/96 "
+            "unmaps to 0.0.0.0/0 and contains the metadata address. It holds the "
+            "premise the Go guard rests on as an executable statement rather "
+            "than a comment, and reads no repository artifact, so any edit that "
+            "reddens it is an edit to the assertion. The controls the premise "
+            "underwrites are mutated: D15-guard-normalises and C1-cidr-guard-inert."
+        ),
+    }
+
+    @staticmethod
+    def _mutation_targets() -> list[str]:
+        """The `kills` field of every mutation, read without importing it.
+
+        The harness is a script rather than a module -- importing it to read a
+        list would run the argument parser -- so this reads the literal out of
+        the AST. Which also means a syntax error there fails here.
+        """
+        import ast
+
+        source = Path(__file__).resolve().parents[2] / "hack" / "conformance-mutations.py"
+        targets = []
+        for node in ast.walk(ast.parse(source.read_text())):
+            if not isinstance(node, ast.Call) or getattr(node.func, "id", "") != "Mutation":
+                continue
+            if len(node.args) >= 4 and isinstance(node.args[3], ast.Constant):
+                targets.append(node.args[3].value)
+        return targets
+
+    def test_every_bucket_one_assertion_is_named_by_a_mutation(self) -> None:
+        _load_every_test_module()
+        targets = self._mutation_targets()
+        self.assertGreater(len(targets), 60, "the mutation set failed to parse")
+
+        unattacked = []
+        for module_name in _TEST_MODULES:
+            module = importlib.import_module(f".{module_name}", package=__package__)
+            for attribute in sorted(dir(module)):
+                value = getattr(module, attribute)
+                if not isinstance(value, type) or not issubclass(value, unittest.TestCase):
+                    continue
+                for name in sorted(dir(value)):
+                    if not name.startswith("test_") or "_precondition_" in name:
+                        # A precondition test is the pair of a known violation
+                        # and asserts an artifact is still there; harness-source-moved
+                        # is the mutation that covers the whole mechanism.
+                        continue
+                    if f"{value.__name__}.{name}" in h.KNOWN_VIOLATIONS:
+                        # A known violation asserts a control that does not
+                        # exist, so there is nothing to delete. It is verified
+                        # in the other direction: its precondition test above,
+                        # which test_every_known_violation_has_a_precondition_test
+                        # requires, plus the unexpected success it produces the
+                        # day the control lands.
+                        continue
+                    if name in self._NO_CONTROL_TO_REMOVE:
+                        continue
+                    if not any(target in name for target in targets):
+                        unattacked.append(f"{module_name}.{value.__name__}.{name}")
+
+        self.assertEqual(
+            [],
+            sorted(set(unattacked)),
+            "no mutation in hack/conformance-mutations.py names these, so "
+            "nothing has ever confirmed they fail when their control is "
+            "removed. Add a mutation, run it, and record the verdict -- or add "
+            "the test to _NO_CONTROL_TO_REMOVE with a reason",
+        )
+
+    def test_the_exemptions_are_argued_rather_than_listed(self) -> None:
+        """An exemption list with no reasons is how the floor gets lowered."""
+        for name, reason in self._NO_CONTROL_TO_REMOVE.items():
+            self.assertTrue(name.startswith("test_"), name)
+            self.assertGreater(
+                len(reason), 120, f"{name}'s exemption needs an argument, not a note"
+            )
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

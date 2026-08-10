@@ -778,6 +778,35 @@ MUTATIONS: list[Mutation] = [
         "self-check has to be the thing that goes red first",
     ),
     Mutation(
+        "harness-mutation-quietly-unhooked",
+        "hack/conformance-mutations.py",
+        ('"test_C5_the_leader_role_stays_confined_to_coordination",\n'
+         '        "add the ConfigMap lock',
+         '"test_C5_the_leader_role_stays_bounded",\n'
+         '        "add the ConfigMap lock'),
+        "test_every_bucket_one_assertion_is_named_by_a_mutation",
+        "rename a test and update the mutation's `kills` to something that no "
+        "longer matches it. The mutation still runs and still reports a verdict, "
+        "so the run stays green-looking while one assertion quietly stops being "
+        "attacked -- the exact drift the coverage check exists to catch. The "
+        "list is read once at import, so this cannot disturb the run applying it",
+    ),
+    Mutation(
+        "harness-exemption-unargued",
+        "tests/conformance/test_harness_selfcheck.py",
+        ('            "asserts a property of the ipaddress module: that ::ffff:0.0.0.0/96 "\n'
+         '            "unmaps to 0.0.0.0/0 and contains the metadata address. It holds the "\n'
+         '            "premise the Go guard rests on as an executable statement rather "\n'
+         '            "than a comment, and reads no repository artifact, so any edit that "\n'
+         '            "reddens it is an edit to the assertion. The controls the premise "\n'
+         '            "underwrites are mutated: D15-guard-normalises and C1-cidr-guard-inert."',
+         '            "no in-repo control."'),
+        "test_the_exemptions_are_argued_rather_than_listed",
+        "shorten an exemption's reason to a note. An exemption list is the only "
+        "way out of the coverage floor, so it stays honest exactly as long as "
+        "entering it costs an argument",
+    ),
+    Mutation(
         "harness-fixture-emptied",
         "k8s-operator/internal/testing/testdata/platform/expected/platformagent.yaml",
         ("\nkind: ClusterRole\n", "\nkind: ClusterRoleXX\n"),
