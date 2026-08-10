@@ -5,7 +5,9 @@ sidebar:
   order: 7
 ---
 
-The PlatformAgent sandbox container never receives API keys, access tokens, refresh tokens, or Kubernetes ServiceAccount tokens through its environment or filesystem. Credentials live exclusively in a trusted **Envoy credential-proxy sidecar** inside the same Pod, and the sandbox reaches credentialed capabilities only through a policy-enforced local proxy.
+In the default sidecar layout the PlatformAgent sandbox container receives no API keys, access tokens, refresh tokens, or Kubernetes ServiceAccount tokens through its environment or filesystem. Credentials live exclusively in a trusted **Envoy credential-proxy sidecar** inside the same Pod, and the sandbox reaches credentialed capabilities only through a policy-enforced local proxy.
+
+Enabling [`spec.security.splitCredentialBrokerPod`](#splitting-the-broker-into-its-own-pod) changes that in one specific way: the broker moves to a Pod of its own and the sandbox is given a projected ServiceAccount token so it can authenticate across the network. Every unqualified "the sandbox holds no token" statement on this page describes the sidecar layout; [the agent now holds a credential](#the-agent-now-holds-a-credential-and-that-was-a-choice) has the trade.
 
 This page summarizes the architecture. The canonical design — including scope, deny-policy details, migration steps, and CI verification assertions — is [`docs/credential-isolation-design.md`](https://github.com/gke-labs/kube-agents/blob/main/docs/credential-isolation-design.md).
 
@@ -59,16 +61,16 @@ A first deployment in a live environment will find read-only commands nobody ant
 
 ## Credential placement
 
-| Data                            | Sandbox     | Credential sidecar        |
-| ------------------------------- | ----------- | ------------------------- |
-| `spec.deployment.env`           | No          | Yes                       |
-| Slack tokens                    | No          | Yes, Secret-backed env    |
-| PlatformAgent external API key  | No          | Yes, Secret-backed env    |
-| Automatic KSA token mount       | Disabled    | Disabled                  |
-| Explicit projected KSA token    | Not mounted | Read-only, one-hour token |
-| gcloud/kubectl configuration    | No          | Private `emptyDir`        |
-| GitHub installation token/cache | No          | Private `emptyDir`        |
-| Agent workspace                 | Yes         | Yes, for proxied commands |
+| Data                            | Sandbox                                                                               | Credential sidecar        |
+| ------------------------------- | ------------------------------------------------------------------------------------- | ------------------------- |
+| `spec.deployment.env`           | No                                                                                    | Yes                       |
+| Slack tokens                    | No                                                                                    | Yes, Secret-backed env    |
+| PlatformAgent external API key  | No                                                                                    | Yes, Secret-backed env    |
+| Automatic KSA token mount       | Disabled                                                                              | Disabled                  |
+| Explicit projected KSA token    | Not mounted in the sidecar layout; mounted read-only under `splitCredentialBrokerPod` | Read-only, one-hour token |
+| gcloud/kubectl configuration    | No                                                                                    | Private `emptyDir`        |
+| GitHub installation token/cache | No                                                                                    | Private `emptyDir`        |
+| Agent workspace                 | Yes                                                                                   | Yes, for proxied commands |
 
 Pod-wide `automountServiceAccountToken` is `false`. The sidecar's projected token uses the audience `kubeagents-credential-proxy` and expires after one hour; the event watcher gets a separate one-hour Kubernetes-API token projection. Neither token is mounted in the agent or dashboard containers.
 
@@ -81,9 +83,9 @@ Pod-wide `automountServiceAccountToken` is `false`. The sidecar's projected toke
 
 ## Guarantee and limitation
 
-**Guarantee:** the operator does not place managed credentials in the sandbox container's environment, root filesystem, persistent agent volume, or mounted ServiceAccount token path. `spec.deployment.env` is applied to the credential sidecar because it may contain credentials (only four allowlisted OpenTelemetry settings are copied to the sandbox, as literal values only).
+**Guarantee, in the sidecar layout:** the operator does not place managed credentials in the sandbox container's environment, root filesystem, persistent agent volume, or mounted ServiceAccount token path. `spec.deployment.env` is applied to the credential sidecar because it may contain credentials (only four allowlisted OpenTelemetry settings are copied to the sandbox, as literal values only). The one exception is `splitCredentialBrokerPod: true`, which mounts a projected ServiceAccount token in the sandbox on purpose; everything else in this list still holds there.
 
-**Limitation:** containers in one Pod share a network namespace and one Pod identity. The sandbox has no KSA token file, but it can technically reach the GKE metadata server used by the sidecar — a Pod-level NetworkPolicy cannot block metadata for one container while allowing it for another. The design meets the scoped filesystem-and-environment goal but does not provide the stronger identity boundary of separate Pods.
+**Limitation:** containers in one Pod share a network namespace and one Pod identity. The sandbox has no KSA token file in this layout, but it can technically reach the GKE metadata server used by the sidecar — a Pod-level NetworkPolicy cannot block metadata for one container while allowing it for another. The design meets the scoped filesystem-and-environment goal but does not provide the stronger identity boundary of separate Pods.
 
 **This limitation is live in the default install.** [Denying the sandbox the metadata server](#denying-the-sandbox-the-metadata-server) is available, but only on top of the broker Pod split, which is itself off by default. A stock agent can reach `169.254.169.254` and mint the Workload Identity token directly, bypassing the broker and every policy control in front of it.
 
