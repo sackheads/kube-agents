@@ -4,11 +4,13 @@ name: Conformance
 # per invariant in the F10 requirements set, or a written reason the invariant
 # cannot be tested yet.
 #
-# **No paths filter, on purpose.** Every other Python job in this repository
-# gates on dorny/paths-filter, and for those it is the right trade: they assert
-# properties of one directory. This suite asserts properties of the repository
-# — the Dockerfile's build gate, the rendered operator manifests, the workflows
-# in this directory, the chart's RBAC, the upstream skill sync — so the filter
+# **No paths filter, on purpose.** The filtered Python jobs here --
+# agent-startup-test.yml, and k8s-operator-test.yml on the Go side -- gate on
+# dorny/paths-filter, and for those it is the right trade: they assert
+# properties of one directory. (python-tests.yml is already unfiltered, and
+# says so.) This suite asserts properties of the repository — the Dockerfile's
+# build gate, the rendered operator manifests, the workflows in this directory,
+# the chart's RBAC, the upstream skill sync — so the filter
 # that covered it would be "almost everything", and the failure mode of getting
 # that list slightly wrong is a security control whose regression test silently
 # stops starting. That has already happened once here: the upstream-skill sync
@@ -53,7 +55,7 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --disable-pip-version-check pyyaml
 
-      # Bucket 1 only. Bucket 2 needs a cluster and is wired into the rc
-      # pipeline, not this one.
+      # Bucket 1 only. Bucket 2 needs a cluster; its intended home is the rc
+      # pipeline, which does not run it yet.
       - name: Run the conformance suite
         run: python3 tests/conformance/run.py
