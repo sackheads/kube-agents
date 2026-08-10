@@ -12,7 +12,7 @@ built, so the line is worth stating once:
 | Judged by       | an LLM                                             | an assertion                                      |
 | Deterministic   | no                                                 | yes                                               |
 | Needs a cluster | yes                                                | no, for bucket 1                                  |
-| Lives in        | `bench/`                                           | here                                              |
+| Lives in        | not built yet; `bench/` is the intended home       | here                                              |
 
 ## Running it
 
@@ -38,13 +38,26 @@ PyYAML and takes under a second.
 **Bucket 1** — no cluster, no credentials, no LLM. The bulk of the value and
 all of the CI coverage.
 
-**Bucket 2** — needs a cluster, needs no human. Written, wired, skipped.
-`tests/conformance/bucket2/`, destined for the `rc` pipeline.
+**Bucket 2** — needs a cluster, needs no human. Written and skipped, in
+`tests/conformance/bucket2/`. Destined for the `rc` pipeline and not yet
+wired into it: nothing under `scripts/release/` runs this suite today.
 
-**Bucket 3** — cannot be automated yet, or needs a decision first. Recorded as
-a class docstring saying `BUCKET 3`, why, and what would make it bucket 1. Not
-a missing test — a written reason, which
-`test_harness_selfcheck.py` requires to exist.
+**Bucket 3** — cannot be automated yet, or needs a decision first. A written
+reason rather than a missing test, and recorded in two different places
+depending on how much of the invariant is affected.
+
+Three invariants are bucket 3 _outright_ — D3, D5 and D6 have no mechanism to
+test at all. Each has a class whose docstring says `BUCKET 3`, why, and what
+would make it bucket 1, and `test_harness_selfcheck.py` fails if an invariant
+has neither a test nor such a docstring.
+
+The other nine bucket-3 entries in the table below are _aspects_ of an
+invariant that also has bucket-1 tests — A2's staleness bound, B4's deploy
+credential scoping, D1's read scoping and so on. Nothing in code guards those
+reasons, because the invariant they belong to is already covered and the
+self-check cannot tell a partial answer from a complete one. The table is
+their only record. That is a real weakness and it is the first thing to fix if
+this suite is ever used as a coverage claim rather than as a coverage map.
 
 A test that pins a non-control is worse than no test. The git lease is the
 cautionary example: a concurrency control whose own docstring says it is not an
@@ -62,15 +75,32 @@ The obvious hole in that scheme is that `expectedFailure` swallows every
 exception, including the `FileNotFoundError` from an artifact that moved. Two
 things close it: every violation test is paired with a plainly-passing
 `..._precondition_...` test asserting the artifact and its anchor are still
-there, and `_harness.SOURCES` registers every file the suite reads with an
-anchor string that `test_harness_selfcheck.py` verifies. Rename a symbol and
-the self-check goes red before anything gets a chance to pass quietly.
+there, and `_harness.SOURCES` registers every fixed-path artifact the suite
+reads with an anchor string that `test_harness_selfcheck.py` verifies. Rename
+a symbol and the self-check goes red before anything gets a chance to pass
+quietly.
+
+One set of inputs is not registered: the group-B workflow tests glob
+`.github/workflows/*.yml` rather than naming each file, because the assertion
+is about the set and a registry would have to be edited every time a workflow
+is added. Those tests assert a non-empty glob for the same reason the registry
+exists.
 
 ## Invariant → test → bucket → historical attack
 
 `A1`–`D6` are the twenty-one invariants in `04_major_requirements.md`.
 **KV** marks a known violation: the test exists, asserts the invariant, and
 currently fails.
+
+> **The cited documents are not in this repository.**
+> `04_major_requirements.md`, `slice-2a/`, `slice-2b/findings.md` and
+> `overnight-b/findings.md` live in a separate working repository that is not
+> published, so those citations do not resolve for a reader here. The table
+> below is the vendored summary: it states each invariant's assertion in full,
+> so nothing in the suite depends on being able to open the source document.
+> A citation identifies _where a finding was first written down_, so that the
+> suite and the findings record can be reconciled by someone who has both —
+> not a link a reader is expected to follow.
 
 | Inv | Assertion                                                        | Bucket   | Test                                                                  | Attack it would have caught                                                                                                                                                                                        |
 | --- | ---------------------------------------------------------------- | -------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -86,11 +116,12 @@ currently fails.
 | A3  | `--server` / `--insecure-skip-tls-verify` refused                | 1        | `test_A3_rejects_credential_redirection`                              | **slice 2a**: bearer token delivered to a localhost listener                                                                                                                                                       |
 | A3  | attached shorthand `-shttp://host` refused                       | 1        | `test_A3_rejects_attached_shorthand_server`                           | **slice 2a**: exact-token matching evaded by pflag's attached shorthand                                                                                                                                            |
 | A3  | …and `--sort-by`/`--since`/`--selector` still work               | 1        | `test_A3_the_attached_shorthand_rule_does_not_overreach`              | the over-broad fix that breaks reads and gets switched off                                                                                                                                                         |
+| A3  | a request with no verified principal is refused                  | 2        | `Scenario4NoVerifiedIdentity`                                         | a session with no principal executed under the agent's own identity, which makes D1 unenforceable                                                                                                                  |
 | A3  | the session-inject endpoint authenticates its caller             | 1 **KV** | `test_A3_the_session_inject_endpoint_authenticates_its_caller`        | **slice 2b 1.8**: `/sessions/{id}/inject` on `0.0.0.0:8699`, no auth, triggers a full agent turn                                                                                                                   |
 | A4  | the operator cannot escalate its own grants                      | 1        | `test_A4_the_operator_cannot_escalate_its_own_grants`                 | a controller with RBAC CRUD and `escalate` makes every ceiling advisory                                                                                                                                            |
 | A4  | the chart grants the same ceiling as the kustomize role          | 1        | `test_A4_the_chart_grants_the_same_ceiling_as_the_kustomize_role`     | a ceiling asserted on one install path only                                                                                                                                                                        |
 | A4  | triggering is delegation                                         | 1        | `test_A4_triggering_is_covered_by_the_A3_inject_finding`              | see A3 above — the one instance in this codebase                                                                                                                                                                   |
-| B1  | 25 kubectl write verbs refused                                   | 1        | `test_B1_kubectl_write_verbs_are_refused`                             | `kubectl delete namespace prod` reaching the sidecar and running                                                                                                                                                   |
+| B1  | every kubectl write verb refused                                 | 1        | `test_B1_kubectl_write_verbs_are_refused`                             | `kubectl delete namespace prod` reaching the sidecar and running                                                                                                                                                   |
 | B1  | ordinary reads still work                                        | 1        | `test_B1_ordinary_reads_still_work`                                   | an over-strict gate that gets globally disabled                                                                                                                                                                    |
 | B1  | gcloud write commands refused                                    | 1        | `test_B1_gcloud_write_commands_are_refused`                           | —                                                                                                                                                                                                                  |
 | B1  | the sandbox image ships no credentialed CLI                      | 1        | `test_B1_the_sandbox_image_ships_no_credentialed_cli`                 | a gate in a stage the agent image does not derive from                                                                                                                                                             |
@@ -149,6 +180,7 @@ currently fails.
 | D1  | the exec route records a principal                               | 1        | `test_D1_the_exec_route_records_a_principal`                          | unattributed actions                                                                                                                                                                                               |
 | D1  | a log hint cannot forge a record                                 | 1        | `test_D1_a_log_hint_cannot_forge_a_record`                            | agent-controlled bytes in the audit trail                                                                                                                                                                          |
 | D1  | the refusal log hint names no caller-supplied value              | 1 **KV** | `test_D1_the_refusal_log_hint_names_no_caller_supplied_value`         | **new, found writing this suite** — `gcloud projects delete X` logs `projects.delete.X`. See `overnight-b/findings.md` 2.1                                                                                         |
+| D1  | a read through the agent names both principals                   | 2        | `Scenario7AuditAttribution`                                           | the two-principal audit trail asserted rather than verified; how GKE represents `impersonatedUser` is undocumented                                                                                                 |
 | D1  | the record lives where the agent cannot reach it                 | **3**    | —                                                                     | Cloud Logging is out of reach today by geometry rather than by a control. Read-side scoping does not exist at all, and a unified audit log is by construction the richest cross-tenant aggregation in the product. |
 | D2  | no direct-apply or break-glass mode exists                       | 1        | `test_D2_no_direct_apply_mode_exists`                                 | `workflowMode: Direct` as an agent config option                                                                                                                                                                   |
 | D2  | the read-only posture is not a customer-facing knob              | 1        | `test_D2_the_read_only_posture_is_not_a_customer_facing_knob`         | a global autonomy setting                                                                                                                                                                                          |
@@ -167,8 +199,9 @@ currently fails.
 ## D15 — the parser-differential class, and it is open
 
 Every Critical this project has found is the checker and the executor parsing
-the same input differently. `test_D15_parser_differentials.py` holds one test
-per known differential plus the class-level tests:
+the same input differently. `test_D15_parser_differentials.py` holds the
+class-level tests plus the differentials not already asserted where their
+invariant lives; the table says which is which:
 
 | Differential                                               | Where it is asserted                                                                                                                                                      |
 | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -194,7 +227,20 @@ confirming the suite goes red. If deleting the control leaves the suite green,
 the test does not exist — slice 2a shipped a whole gate that could be deleted
 with its suite byte-identical, and only a dedicated task caught it.
 
-Per-test results are in `~/src/kube-agents-vamp/docs/overnight-b/mutations.md`.
+`hack/conformance-mutations.py` is how that is checked, and re-running it is
+how it stays true:
+
+```
+python3 hack/conformance-mutations.py          # every mutation
+python3 hack/conformance-mutations.py --list
+python3 hack/conformance-mutations.py -k C1    # substring filter on the id
+```
+
+43 mutations at the time of writing: 42 caught, one deliberately harmless as a
+control on the harness itself, zero genuine survivors. Each names the control
+it removes, the test that must notice, and the plausible bad change it
+imitates. It is not run in CI — it edits tracked files in place — so it is a
+thing to run when adding a test, which step 4 below says to do.
 
 ## Adding a test
 
