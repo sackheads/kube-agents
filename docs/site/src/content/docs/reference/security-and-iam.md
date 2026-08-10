@@ -181,6 +181,9 @@ The agent never has direct write access to running infrastructure — see [Decla
 
 - **No direct cluster writes.** Enforced by RBAC (above) and by the persona's automation-first stance — the agent does not `kubectl apply`; it opens PRs. See [Platform Agent](/kube-agents/concepts/platform-agent/).
 - **No credentials in the sandbox.** API keys, chat tokens, and ServiceAccount tokens live only in the Envoy credential-proxy sidecar; the agent container gets wrapper CLIs that forward through a policy-enforced local proxy. See [Credential isolation](/kube-agents/reference/credential-isolation/).
+
+  **This is a filesystem and environment boundary, not a network one, and the default install does not close it.** The sidecar shares a Pod — and therefore a network namespace and one Pod identity — with the sandbox, so the agent container can reach the link-local metadata server at `169.254.169.254` and mint the Workload Identity service account's token itself, bypassing the proxy and every command policy in front of it. Two opt-in fields close that path, `spec.security.splitCredentialBrokerPod` and `spec.security.egressPolicy: Allowlist`, and **both default to off**. What they cost, what they break, and what to check on the cluster first are on [Credential isolation](/kube-agents/reference/credential-isolation/#denying-the-sandbox-the-metadata-server), which owns the topic.
+
 - **One agent per project.** The admission webhook rejects a second `PlatformAgent` CR, so a cluster can't accumulate agents with overlapping scope. See [PlatformAgent CRD](/kube-agents/operator/platformagent-crd/).
 - **Human sign-off for destructive ops.** Cluster deletion, tenant offboarding, and broad IAM revocation always require explicit human approval, regardless of any "just do it" phrasing.
 - **Bounded recovery.** The agent retries a blocker through its recovery ladder (roughly five iterations or ~10 minutes) before escalating to a human instead of looping indefinitely.
