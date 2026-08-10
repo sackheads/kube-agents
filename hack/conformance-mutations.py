@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import os
 import re
 import subprocess
 import sys
@@ -787,14 +788,39 @@ MUTATIONS: list[Mutation] = [
 ]
 
 
+def _purge_bytecode() -> None:
+    """Delete every __pycache__ the suite could import from.
+
+    CPython decides a .pyc is current by comparing the source's mtime *in whole
+    seconds* and its size. A mutation that preserves file size -- renaming a
+    symbol to another of the same length is the obvious one -- and is restored
+    by `git checkout` inside the same second produces a source file that is
+    byte-identical to HEAD and a cache entry compiled from the mutated text,
+    with no way to tell them apart. That leaks into every subsequent mutation:
+    the baseline is no longer the tree, and a later mutation can be credited
+    with a kill that belongs to the leftover.
+
+    Found the hard way -- see overnight-b/findings.md.
+    """
+    for cache in REPO.rglob("__pycache__"):
+        if ".git" in cache.parts:
+            continue
+        for entry in cache.glob("*.pyc"):
+            entry.unlink()
+
+
 def _run_suite() -> tuple[set[str], set[str]]:
     """(failed test names, unexpectedly-successful test names)."""
+    _purge_bytecode()
     process = subprocess.run(
-        [sys.executable, "tests/conformance/run.py"],
+        # -B: write no bytecode at all, so nothing survives to go stale. The
+        # purge above covers caches written before this ran.
+        [sys.executable, "-B", "tests/conformance/run.py"],
         cwd=REPO,
         capture_output=True,
         text=True,
         timeout=300,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
     )
     output = process.stdout + process.stderr
     failed = set(re.findall(r"^(?:FAIL|ERROR): (\S+)", output, re.MULTILINE))
@@ -866,6 +892,20 @@ def main() -> int:
         detail = f"  (also: {', '.join(others[:3])}{'…' if len(others) > 3 else ''})" if others else ""
         print(f"{verdict:8} {mutation.id}{detail}")
 
+    # Re-baseline. Every mutation is restored in a `finally`, so the tree is
+    # clean by construction -- but "the tree is clean" and "the suite is back
+    # where it started" are different claims, and the second is the one the
+    # verdicts above rest on. A run that ends dirty has been scoring later
+    # mutations against a polluted baseline.
+    closing_failed, closing_unexpected = _run_suite()
+    leaked = sorted(closing_failed | closing_unexpected)
+    if leaked:
+        print(
+            f"\nBASELINE POLLUTED: the suite is not green after restoring "
+            f"every mutation: {leaked}. Verdicts after the mutation that "
+            f"caused it are not trustworthy."
+        )
+
     survived = [m.id for m, verdict, _ in verdicts if verdict in ("SURVIVED", "OVERSHOT")]
     stale = [m.id for m, verdict, _ in verdicts if verdict == "STALE"]
     print(
@@ -881,7 +921,7 @@ def main() -> int:
         )
     if stale:
         print(f"STALE: {stale} -- the mutation no longer applies; rewrite it")
-    return 1 if survived or stale else 0
+    return 1 if survived or stale or leaked else 0
 
 
 if __name__ == "__main__":
