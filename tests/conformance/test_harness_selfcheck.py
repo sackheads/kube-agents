@@ -273,27 +273,33 @@ class EveryAssertionHasBeenAttacked(unittest.TestCase):
 
     `hack/conformance-mutations.py` is what breaks them, and running it is
     manual -- it edits tracked files in place, so it cannot go in CI. That
-    makes its coverage the thing that rots: 43 mutations named 43 tests while
-    29 passing assertions had none, and the README said every test had been
-    verified. The claim was three years of good intentions and no mechanism.
+    makes its coverage the thing that rots, and it had: 43 mutations naming 42
+    distinct tests while 29 passing assertions were named by none, under a
+    README saying every test had been verified. The claim was in prose, and
+    prose does not fail.
 
     This is the mechanism. It reads the mutation set as data and requires a
     mutation per assertion, which is cheap because a new test that nobody
     mutated fails here on the same pull request that adds it.
 
-    Two limits, stated rather than discovered later:
+    Three limits, stated rather than discovered later:
 
     It cannot check that the mutation is a *good* one -- that it removes the
     control rather than something adjacent to it. Two of the original 43 named
     a control the test did not actually assert, and only the run itself caught
     them. So this is a floor, not a proof.
 
+    It skips precondition tests as well as the two exemptions below. A
+    precondition asserts that an artifact and its anchor are still present, and
+    the mechanism behind all of them is mutated once, by harness-source-moved,
+    rather than once per test.
+
     It walks _TEST_MODULES, which does not include this module, so the
     self-check does not police its own coverage. That is a real gap and not a
     clean one to close: several assertions here have no string-replace that
     removes their control -- falsifying "no test module is left out" means
-    adding a file, not editing one. Four are mutated anyway (the two harness-*
-    entries and the two added with this class); the rest are not.
+    adding a file, not editing one. The four harness-* mutations cover four of
+    them; the rest are not covered.
     """
 
     #: Assertions with no in-repo control to remove. Each needs a reason, and
@@ -314,9 +320,11 @@ class EveryAssertionHasBeenAttacked(unittest.TestCase):
     def _mutation_targets() -> list[str]:
         """The `kills` field of every mutation, read without importing it.
 
-        The harness is a script rather than a module -- importing it to read a
-        list would run the argument parser -- so this reads the literal out of
-        the AST. Which also means a syntax error there fails here.
+        The harness is a script with a hyphen in its name, in a directory that
+        is not a package, so there is no import statement that reaches it and
+        loading it by path to read one list is more machinery than reading the
+        literal out of the AST. Which also means a syntax error there fails
+        here.
         """
         import ast
 

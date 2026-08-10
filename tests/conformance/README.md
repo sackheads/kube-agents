@@ -248,12 +248,19 @@ while 29 passing assertions were named by no mutation at all. A manual harness
 outside CI is exactly the thing that drifts, so
 `test_every_bucket_one_assertion_is_named_by_a_mutation` reads the mutation set
 out of the harness's AST and fails when an assertion is attacked by nothing.
-Two exemptions, both principled and both enforced rather than conventional:
-a known violation has no control to delete and is verified by its precondition
-pair instead, and one assertion — that `::ffff:0.0.0.0/96` unmaps to
-`0.0.0.0/0` — reads no repository artifact, so any edit that reddens it is an
-edit to the assertion. That check is a floor, not a proof: it knows a mutation
-exists, not that the mutation removes the right thing.
+
+Three carve-outs, each for a stated reason rather than by convention. A known
+violation has no control to delete and is verified by its precondition pair
+instead. A precondition test asserts that an artifact and its anchor are still
+present, and that whole mechanism is mutated once by `harness-source-moved`
+rather than once per test. And one assertion — that `::ffff:0.0.0.0/96` unmaps
+to `0.0.0.0/0` — reads no repository artifact, so any edit that reddens it is
+an edit to the assertion; that one is an entry in an exemption list whose own
+test requires each entry to carry an argument.
+
+The check is a floor, not a proof: it knows a mutation exists, not that the
+mutation removes the right thing. It also walks the five invariant modules and
+not `test_harness_selfcheck.py`, so it does not police its own coverage.
 
 **Restoring the tree is not the same as restoring the suite.** A mutation that
 renames a symbol to another of the same length leaves the file size unchanged;
