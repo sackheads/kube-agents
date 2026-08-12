@@ -908,6 +908,8 @@ spec:
               value: /var/run/secrets/kubeagents/serviceaccount/token
             - name: TOKEN_BROKER_URL
               value: http://github-token-minter.kubeagents-system.svc.cluster.local:8080/token
+            - name: CREDENTIAL_PROXY_SCOPED_SA_POOL
+              value: "0"
             - name: CREDENTIAL_PROXY_ROLE
               value: broker
             - name: CREDENTIAL_PROXY_ENVOY_ADDRESS

@@ -26,6 +26,10 @@ spec:
     serviceAccountAnnotations:
       {{- toYaml . | nindent 6 }}
     {{- end }}
+    {{- with .Values.platformAgent.security.scopedServiceAccounts }}
+    scopedServiceAccounts:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
   {{- $integ := .Values.platformAgent.integration }}
   {{- if or $integ.github.gitRepo $integ.googleChat.enabled $integ.slack.enabled }}
   integration:
