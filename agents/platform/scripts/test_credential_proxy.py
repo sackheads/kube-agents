@@ -225,7 +225,10 @@ class GitLeaseGateTest(unittest.TestCase):
     def executor(self, **environment):
         with mock.patch.dict(os.environ, environment):
             return CommandExecutor(
-                timeout_seconds=5, max_output_bytes=1024, state_dir=self.temp_dir.name
+                timeout_seconds=5,
+                max_output_bytes=1024,
+                state_dir=self.temp_dir.name,
+                scoped_pool=None,
             )
 
     def leased(self, executor, lease="compliance-audit", repo="acme__fleet"):
@@ -461,6 +464,7 @@ class GitHardeningTest(unittest.TestCase):
             timeout_seconds=30,
             max_output_bytes=max_output_bytes,
             state_dir=str(Path(self.temp_dir.name) / "state"),
+            scoped_pool=None,
         )
 
     def executed(self):
@@ -1059,6 +1063,7 @@ class GitLeaseGateWiringTest(unittest.TestCase):
             timeout_seconds=5,
             max_output_bytes=4096,
             state_dir=str(Path(self.temp_dir.name) / "state"),
+            scoped_pool=None,
         )
         CredentialProxyHandler.max_request_bytes = 65536
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), CredentialProxyHandler)
@@ -1140,6 +1145,7 @@ class CommandExecutorTest(unittest.TestCase):
             timeout_seconds=timeout_seconds,
             max_output_bytes=max_output_bytes,
             state_dir=self.temp_dir.name,
+            scoped_pool=None,
         )
 
     def caller_kubeconfig(self, executor, name="kubeconfig.yaml", body=None):
@@ -2212,6 +2218,9 @@ class ServeArmsTheReadOnlyGateTest(unittest.TestCase):
         environment = {
             "API_SERVER_EXTERNAL_KEY": "external",
             "CREDENTIAL_PROXY_BOOTSTRAP_COMMAND": "",
+            # Armed by default now, and this case drives `serve` for an
+            # unrelated property with no pool mapping mounted.
+            "CREDENTIAL_PROXY_SCOPED_SA_POOL": "0",
         }
         if enforce_value is not None:
             environment["CREDENTIAL_PROXY_ENFORCE_READ_ONLY"] = enforce_value
@@ -2426,7 +2435,14 @@ class BackendSocketModeTest(unittest.TestCase):
             )
             previous_umask = os.umask(0o000)
             try:
-                with mock.patch.dict(os.environ, {"API_SERVER_EXTERNAL_KEY": "external"}, clear=True), \
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "API_SERVER_EXTERNAL_KEY": "external",
+                        "CREDENTIAL_PROXY_SCOPED_SA_POOL": "0",
+                    },
+                    clear=True,
+                ), \
                         mock.patch.object(credential_proxy, "ThreadingHTTPServer", mock.MagicMock()), \
                         mock.patch.object(credential_proxy.threading, "Thread", FakeThread), \
                         mock.patch.object(credential_proxy.ThreadingUnixHTTPServer, "serve_forever", stop):
@@ -2761,6 +2777,7 @@ class ServeRefusesAnUnauthenticatedTCPListenerTest(unittest.TestCase):
             "CREDENTIAL_PROXY_AUTH_MODE": "serviceaccount",
             "CREDENTIAL_PROXY_ALLOWED_CALLERS": "system:serviceaccount:ns:agent",
             "KUBERNETES_SERVICE_HOST": "10.0.0.1",
+            "CREDENTIAL_PROXY_SCOPED_SA_POOL": "0",
         }
         original = CredentialProxyHandler.__dict__.get("authenticator")
         try:
@@ -2929,6 +2946,7 @@ class WorkspaceGitPathTest(unittest.TestCase):
                 timeout_seconds=10,
                 max_output_bytes=1 << 16,
                 state_dir=str(Path(self.temp_dir.name) / "state"),
+                scoped_pool=None,
             )
 
     def tree(self, executor, name="repo"):
