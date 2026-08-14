@@ -174,8 +174,11 @@ func TestPlatformAgentReconciler_Reconcile(t *testing.T) {
 			t.Errorf("expected Deployment to have container named 'platform-agent'")
 		}
 	}
-	if len(dep.Spec.Template.Spec.Containers) < 5 || dep.Spec.Template.Spec.Containers[4].Name != "envoy-credential-proxy" {
+	proxyC, found := findContainer(dep.Spec.Template.Spec, "envoy-credential-proxy")
+	if !found {
 		t.Errorf("expected Deployment to contain Envoy credential sidecar")
+	} else if proxyC.RestartPolicy == nil || *proxyC.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Errorf("credential proxy must be a native sidecar (restartPolicy: Always) so it binds its ports before the agent container starts")
 	}
 
 	// Service
