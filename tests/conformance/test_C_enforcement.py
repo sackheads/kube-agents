@@ -240,8 +240,28 @@ class C1IsolationIsStructural(unittest.TestCase):
         self.assertEqual("/dev/null", environment.get("GIT_CONFIG_GLOBAL"))
         self.assertEqual("https", environment.get("GIT_ALLOW_PROTOCOL"))
 
+    @h.known_violation("C1", "slice-2b/findings.md 1.4 (see gke-labs/kube-agents#676)")
     def test_C1_the_rendered_egress_policy_is_default_deny(self) -> None:
-        """NetworkPolicies are additive and have no deny primitive.
+        """KNOWN VIOLATION. A second policy over the same pods adds the internet.
+
+        This asserted the property of the policy this slice renders, and held
+        while that was the only egress policy selecting the agent Pod. It is
+        not any more: gke-labs/kube-agents#676 gave platformagent-gateway-netpol
+        an egress rule for 0.0.0.0/0 and ::/0, and both policies select
+        `app: platformagent-gateway`. Union, so the whole-internet block is
+        part of what the sandbox Pod gets whatever this slice renders beside
+        it. The `except` clauses on that rule do list 169.254.0.0/16, which is
+        why the metadata addresses are a separate violation below rather than
+        this one -- but the reasoning in the paragraph after this still applies
+        to why an `except` is not load-bearing on GKE.
+
+        Recorded rather than fixed because the collision is a design question
+        this slice cannot answer alone: #676 is correct about Workload Identity
+        needing that path, and in the default sidecar layout the credential
+        proxy shares the Pod and genuinely needs it. Only the split-broker
+        layout separates the two, and deciding that is a later slice.
+
+        NetworkPolicies are additive and have no deny primitive.
 
         `0.0.0.0/0 except 169.254.169.254/32` does not subtract the metadata
         server, it adds the internet -- worse than absent. Two further reasons
@@ -274,8 +294,29 @@ class C1IsolationIsStructural(unittest.TestCase):
                             "from an additive policy",
                         )
 
+    @h.known_violation("C1", "slice-2b/findings.md 1.4 (see gke-labs/kube-agents#676)")
     def test_C1_the_rendered_egress_policy_reaches_no_metadata_address(self) -> None:
-        """All three metadata addresses, not just the famous one.
+        """KNOWN VIOLATION. The sandbox reaches the metadata server anyway.
+
+        This is the invariant `spec.security.egressPolicy: Allowlist` exists to
+        establish, and on this tree it does not hold. platformagent-gateway-netpol
+        allows 169.254.169.254/32 on TCP 80 and 8080 -- the metadata server's own
+        ports -- and 169.254.169.252/32 on 988, and it selects the same
+        `app: platformagent-gateway` pods that platformagent-sandbox-metadata-deny
+        selects. Two policies over one Pod union their allow-sets, so opting into
+        the allowlist does not subtract what the other policy adds.
+
+        The failure is real and the feature does not currently do what its name
+        says. Recorded here rather than repaired because #676 was deliberate:
+        Workload Identity needs the metadata path, and the sidecar layout puts
+        the credential proxy in the Pod that would lose it. Scoping those rules
+        to the broker Pod under splitCredentialBrokerPod is the shape of the
+        fix, and it is a design change to a live-tested slice, not a test edit.
+
+        Deleting this decorator is the signal that the control works: unittest
+        reports the pass as an unexpected success.
+
+        All three metadata addresses, not just the famous one.
 
         169.254.169.252 and fd20:ce::254 reach the same metadata service on
         GKE. A guard written against 169.254.169.254 alone is a guard against

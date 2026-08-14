@@ -236,31 +236,35 @@ class A3ThePrincipalComesFromAVerifiedChannel(unittest.TestCase):
                     self.assertTrue(decision.allowed, f"{argv}: {decision.message}")
 
     def test_A3_precondition_the_inject_route_still_exists(self) -> None:
-        """Guards the expected-failure below against a silent pass by relocation.
+        """Keeps the assertion below from passing because the route moved.
 
-        If the route moves or is renamed, the violation test would keep
-        "failing as expected" while asserting nothing. This makes that case red
-        and loud instead.
+        If the route is renamed or deleted, the authentication test would go
+        green while asserting nothing. This makes that case red and loud.
+
+        The bind address is now part of what is asserted rather than part of
+        the precondition: the server binds loopback, which is half of how the
+        cross-Pod reachability was closed. A change back to 0.0.0.0 reopens it
+        and fails here.
         """
         source = h.text("session_kv_server")
         self.assertIn("/sessions/{session_id}/inject", source)
-        self.assertIn("--host 0.0.0.0 --port 8699", h.text("docker_entrypoint"))
+        self.assertIn("--host 127.0.0.1 --port 8699", h.text("docker_entrypoint"))
+        self.assertNotIn("--host 0.0.0.0 --port 8699", h.text("docker_entrypoint"))
 
-    @h.known_violation("A3", "slice-2b/findings.md 1.8")
     def test_A3_the_session_inject_endpoint_authenticates_its_caller(self) -> None:
-        """KNOWN VIOLATION. Unauthenticated prompt injection over the Pod network.
+        """CLOSED. Was a known violation; main fixed it while this slice was in flight.
 
-        `/sessions/{id}/inject` triggers a full agent turn with no auth check,
-        on a server bound to 0.0.0.0:8699. No Service publishes the port and
-        every in-repo client uses loopback, so there is no observed cross-pod
-        traffic -- but any Pod that can route to the agent Pod IP can make the
-        agent execute a prompt, and the prompt template the handler builds
-        tells the agent it is authorised to open a pull request.
+        `/sessions/{id}/inject` triggers a full agent turn, and the prompt the
+        handler builds tells the agent it is authorised to open a pull request.
+        It used to do that with no auth check at all, on a server bound to
+        0.0.0.0:8699 -- no forgery required, which is worse than the unverified
+        header A3 forbids.
 
-        A3 forbids identity asserted in an unverified header. This is worse:
-        no forgery is required. Closing it needs an ingress NetworkPolicy and
-        an auth decision; the egress policy slice 2b added is
-        `PolicyTypes: [Egress]` only, deliberately, so it does not help.
+        gke-labs/kube-agents#616 closed it: the route authenticates, and the
+        server binds loopback (asserted in the precondition above). The
+        known_violation decorator came off when this started passing, which is
+        the mechanism working as designed -- the suite reported the fix as an
+        unexpected success rather than letting it pass unnoticed.
         """
         source = h.text("session_kv_server")
         route = source.split('"/sessions/{session_id}/inject"', 1)[1]
@@ -334,17 +338,24 @@ class A4DelegationAttenuates(unittest.TestCase):
         """The second half of A4 has one instance in this codebase, already named.
 
         A4 says causing a session to start is itself a privileged operation. The
-        only unauthenticated trigger in the repo is the session-KV inject
+        only unauthenticated trigger in the repo was the session-KV inject
         endpoint, asserted above under A3. This test exists so the invariant is
         not silently uncovered: it fails if that assertion is deleted.
+
+        It used to assert the A3 test was a *known violation*. That stopped
+        being true when main closed the finding, so what it checks now is that
+        the assertion still exists and still runs -- which is what "not
+        silently uncovered" meant all along. Coupling it to the violation
+        register made passing the invariant look like losing its coverage.
         """
-        qualname = (
-            A3ThePrincipalComesFromAVerifiedChannel.__name__
-            + ".test_A3_the_session_inject_endpoint_authenticates_its_caller"
-        )
-        self.assertIn(
-            qualname,
-            h.KNOWN_VIOLATIONS,
+        self.assertTrue(
+            callable(
+                getattr(
+                    A3ThePrincipalComesFromAVerifiedChannel,
+                    "test_A3_the_session_inject_endpoint_authenticates_its_caller",
+                    None,
+                )
+            ),
             "the A3 inject-endpoint assertion is gone; A4's triggering clause "
             "now has no test at all",
         )

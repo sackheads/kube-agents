@@ -301,10 +301,18 @@ class B2AssentIsHumanOrPolicy(unittest.TestCase):
     def test_B2_no_workflow_grants_a_bot_the_ability_to_approve(self) -> None:
         """`pull-requests: write` is the permission an approval needs.
 
-        One workflow holds it -- auto_request_review, which requests reviewers
-        and does not give them. This asserts the count rather than the absence,
-        so a second holder is a red test and a conversation rather than a
-        silent addition.
+        Two workflows hold it, and neither can give an approval:
+
+        - auto_request_review, which requests reviewers and does not give them.
+        - auto-assign-milestone, added on main after this suite was written.
+          It triggers on `pull_request_target: closed` gated on
+          `merged == true`, so it runs only after the merge decision has been
+          taken, and its one call is `gh pr edit --milestone`.
+
+        The list is an allowlist of holders, not of intents: the permission is
+        a capability, and this asserts membership rather than absence so a
+        third holder is a red test and a conversation rather than a silent
+        addition. Adding a name here means someone read the workflow.
         """
         holders = []
         for path, document in _workflow_documents():
@@ -318,7 +326,7 @@ class B2AssentIsHumanOrPolicy(unittest.TestCase):
                     holders.append(path.name)
                     break
         self.assertEqual(
-            ["auto_request_review.yml"],
+            ["auto-assign-milestone.yml", "auto_request_review.yml"],
             sorted(set(holders)),
             "an unexpected workflow can write to pull requests",
         )

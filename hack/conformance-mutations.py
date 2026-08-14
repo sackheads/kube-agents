@@ -64,6 +64,16 @@ class Mutation:
 MUTATIONS: list[Mutation] = [
     # ---- A. Authority ---------------------------------------------------
     Mutation(
+        "A3-inject-auth",
+        "agents/platform/scripts/session_kv_server.py",
+        ('"/sessions/{session_id}/inject", dependencies=[Depends(verify_api_key)])',
+         '"/sessions/{session_id}/inject")'),
+        "test_A3_the_session_inject_endpoint_authenticates_its_caller",
+        "drop the route's auth dependency, restoring the unauthenticated "
+        "prompt-injection endpoint gke-labs/kube-agents#616 closed -- the exact "
+        "state this assertion recorded as a known violation until main fixed it",
+    ),
+    Mutation(
         "A3-impersonation-flags",
         "agents/platform/scripts/command_policy.py",
         ('{"--as", "--as-group", "--as-uid", "--as-user-extra", "--impersonate-service-account"}',

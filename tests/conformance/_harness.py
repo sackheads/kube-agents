@@ -107,7 +107,7 @@ SOURCES: dict[str, Source] = {
         "k8s-operator/internal/controller/platformagent_manifests.go",
         (
             "credentialProxyPolicyJSON",
-            "buildPlatformExplorerRole",
+            "buildMinimalPlatformRole",
             "No ShareProcessNamespace",
             "sandboxUID",
             "credentialProxyUID",
@@ -169,7 +169,7 @@ SOURCES: dict[str, Source] = {
     # --- supply chain -----------------------------------------------------
     "skill_sync": Source(
         "scripts/sync-upstream-skills.py",
-        ("UPSTREAM_REPO", "sparse-checkout"),
+        ("UPSTREAM_REPO", "--depth"),
     ),
     "tags_env": Source("tags.env", ("HERMES_AGENT_TAG",)),
     "chart_values": Source("charts/kube-agents/values.yaml", ("repository:",)),
