@@ -380,15 +380,20 @@ MUTATIONS: list[Mutation] = [
         "test_C1_the_executor_refuses_an_executable_it_does_not_ship",
         "add sh to the allowlist, giving a compound command somewhere to land",
     ),
-    Mutation(
-        "C1-egress-whole-internet",
-        "k8s-operator/internal/testing/testdata/platform/expected/platformagent-egress-allowlist.yaml",
-        ("        - ipBlock:\n            cidr: 172.16.0.0/28",
-         "        - ipBlock:\n            cidr: 0.0.0.0/0\n            except:\n            - 169.254.169.254/32"),
-        "test_C1_the_rendered_egress_policy",
-        "the exact construction slice 2b 1.3 refused: `0.0.0.0/0 except "
-        "metadata`, which adds the internet rather than subtracting an address",
-    ),
+    # C1-egress-whole-internet is retired, not lost. It injected the exact
+    # construction slice 2b 1.3 refused -- `0.0.0.0/0 except metadata`, which
+    # adds the internet rather than subtracting an address -- into the
+    # allowlist golden, and killed test_C1_the_rendered_egress_policy*.
+    #
+    # Both of those assertions are known violations as of
+    # gke-labs/kube-agents#676: platformagent-gateway-netpol selects the same
+    # pods and already allows the whole internet and the metadata addresses,
+    # so the tests fail before the mutation is applied and applying it changes
+    # nothing. A mutation against an expected failure can only report
+    # SURVIVED, which reads as "the test is theatre" and is the wrong
+    # diagnosis. A known violation is verified by its precondition instead.
+    #
+    # Restore this the day the C1 decorators come off.
     Mutation(
         "C1-cidr-guard-inert",
         "k8s-operator/internal/controller/platformagent_egress_policy.go",
@@ -506,7 +511,7 @@ MUTATIONS: list[Mutation] = [
         "C1-sandbox-back-in-the-broker-pod",
         "k8s-operator/internal/testing/testdata/platform/expected/platformagent-split-broker.yaml",
         ("      containers:\n        - command:\n"
-         "            - /usr/local/bin/envoy-credential-sidecar\n",
+         "            - /usr/local/bin/start-services\n",
          "      containers:\n"
          "        - image: ghcr.io/gke-labs/kube-agents/platform-agent:v9.9.9\n"
          "          imagePullPolicy: IfNotPresent\n"
@@ -516,7 +521,7 @@ MUTATIONS: list[Mutation] = [
          "            readOnlyRootFilesystem: true\n"
          "            runAsUser: 10000\n"
          "        - command:\n"
-         "            - /usr/local/bin/envoy-credential-sidecar\n"),
+         "            - /usr/local/bin/start-services\n"),
         "test_C1_the_split_broker_pod_holds_no_sandbox_container",
         "a golden fixture regenerated after the sandbox was co-located back "
         "into the broker Pod to share the workspace over localhost. Distinct "
