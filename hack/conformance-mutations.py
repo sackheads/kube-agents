@@ -462,7 +462,7 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "C4-base-image-digest",
         "tags.env",
-        ("@sha256:a6ce64e2038867885c2c90f6602425e6e70293d5e6d952a0e603a99265e01c40", ""),
+        ("@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e", ""),
         "test_C4_the_agent_base_image_is_pinned_by_digest",
         "drop the digest and keep the tag, which reads as equivalent",
     ),
@@ -477,10 +477,14 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "C5-bind-to-edit",
         "k8s-operator/internal/testing/testdata/platform/expected/platformagent.yaml",
-        ("  name: view\n", "  name: edit\n"),
+        ("kind: ClusterRole\n  name: kubeagents:minimal:kubeagents-system:platformagent\n",
+         "kind: ClusterRole\n  name: edit\n"),
         "test_C5_the_agent_is_bound_to_no_write_capable_builtin_role",
         "bind the agent to `edit` while leaving every minted rule read-only, "
-        "which the verb-level assertion alone cannot see",
+        "which the verb-level assertion alone cannot see. Retargeted from "
+        "`name: view`: main replaced the built-in binding with a purpose-built "
+        "kubeagents:minimal ClusterRole, so there is no `view` left to swap -- "
+        "the roleRef is still the thing that has to be attacked",
     ),
     Mutation(
         "C5-reaper-eats-guardrail",
