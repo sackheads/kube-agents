@@ -1,3 +1,24 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    iam.gke.io/gcp-service-account: kubeagents-platform-gsa@kube-agents-gkedemos.iam.gserviceaccount.com
+  creationTimestamp: null
+  labels:
+    app.kubernetes.io/instance: kubeagents-system-platformagent
+    app.kubernetes.io/managed-by: platformagent-controller
+    app.kubernetes.io/name: platform-agent
+    app.kubernetes.io/part-of: kube-agents
+  name: kubeagents-platform-agent
+  namespace: kubeagents-system
+  ownerReferences:
+    - apiVersion: kubeagents.x-k8s.io/v1alpha1
+      blockOwnerDeletion: true
+      controller: true
+      kind: PlatformAgent
+      name: platformagent
+      uid: ""
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -320,7 +341,14 @@ data:
       environment_probe: false
     approvals:
       cron_mode: approve
-    display: {}
+    display:
+      platforms:
+        google_chat:
+          busy_ack_detail: false
+          interim_assistant_messages: false
+          long_running_notifications: true
+          memory_notifications: "off"
+          tool_progress: "off"
     kanban:
       auto_subscribe_on_create: true
       dispatch_in_gateway: true
@@ -365,7 +393,8 @@ data:
       - memory
     platforms:
       google_chat:
-        enabled: false
+        enabled: true
+        typing_status_text: Kage is thinking…
       slack:
         enabled: false
         extra:
@@ -510,6 +539,7 @@ data:
         {"id":"tool.self-modification","pattern":"\\bgcloud\\b(?:\\s+\\S+)*?\\s+components\\b(?:\\s+\\S+)*?\\s+(?:install|update|remove)\\b|\\bgh\\b(?:\\s+\\S+)*?\\s+extension\\b(?:\\s+\\S+)*?\\s+(?:install|upgrade|remove)\\b"}
       ]
     }
+  scoped-sa-pool.json: '{"version":1,"serviceAccounts":[{"projectId":"example-project","location":"us-central1-a","clusterName":"cluster-a","serviceAccountEmail":"ka-cluster-a-1a2b3c4d@example-project.iam.gserviceaccount.com"},{"projectId":"example-project","location":"us-central1-a","clusterName":"cluster-b","serviceAccountEmail":"ka-cluster-b-7d2f91a0@example-project.iam.gserviceaccount.com"},{"projectId":"other-project","location":"europe-west1","clusterName":"cluster-a","serviceAccountEmail":"ka-cluster-a-3e8b04c5@other-project.iam.gserviceaccount.com"}]}'
 kind: ConfigMap
 metadata:
   creationTimestamp: null
@@ -603,7 +633,7 @@ spec:
             - name: OTEL_SERVICE_NAME
               value: platformagent-gateway
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: http://otel-collector.otel-collector.svc.cluster.local:4318
+              value: http://opentelemetry-collector.gke-managed-otel.svc.cluster.local:4318
             - name: OTEL_EXPORTER_OTLP_PROTOCOL
               value: http/protobuf
             - name: OTEL_RESOURCE_ATTRIBUTES
@@ -620,6 +650,16 @@ spec:
               value: gke_example-project_us-central1-a_cluster-a
             - name: KUBE_DEFAULT_NAMESPACE
               value: kubeagents-system
+            - name: GOOGLE_CHAT_RELAY_URL
+              value: http://127.0.0.1:8765
+            - name: GOOGLE_CHAT_PROJECT_ID
+              value: kube-agents-gkedemos
+            - name: GOOGLE_CHAT_SUBSCRIPTION_NAME
+              value: projects/kube-agents-gkedemos/subscriptions/kubeagents-google-chat-events-sub
+            - name: GOOGLE_CHAT_ALLOWED_USERS
+            - name: GOOGLE_CHAT_HOME_CHANNEL
+            - name: GOOGLE_CHAT_ALLOW_ALL_USERS
+              value: "true"
             - name: CREDENTIAL_PROXY_URL
               value: http://127.0.0.1:8765
             - name: PATH
@@ -634,8 +674,8 @@ spec:
               value: owner
             - name: API_SERVER_MODEL_NAME
               value: model-default
-          image: ghcr.io/gke-labs/kube-agents/platform-agent:latest
-          imagePullPolicy: Always
+          image: ghcr.io/gke-labs/kube-agents/platform-agent:v9.9.9
+          imagePullPolicy: IfNotPresent
           name: platform-agent
           ports:
             - containerPort: 8642
@@ -682,8 +722,8 @@ spec:
               value: skip
             - name: PLATFORM_AGENT_ROLE
               value: sidecar
-          image: ghcr.io/gke-labs/kube-agents/platform-agent:latest
-          imagePullPolicy: Always
+          image: ghcr.io/gke-labs/kube-agents/platform-agent:v9.9.9
+          imagePullPolicy: IfNotPresent
           name: platform-agent-dashboard
           ports:
             - containerPort: 9119
@@ -742,45 +782,6 @@ spec:
               subPath: parsers.conf
             - mountPath: /fluent-bit/state
               name: fluent-bit-state
-      initContainers:
-        - args:
-            - |-
-              rm -rf -- \
-                /workspace/home/.config/gcloud \
-                /workspace/home/.config/gh \
-                /workspace/home/.aws/credentials \
-                /workspace/home/.aws/cli/cache \
-                /workspace/home/.aws/sso/cache \
-                /workspace/home/.azure \
-                /workspace/home/.docker/config.json \
-                /workspace/home/.git-credentials \
-                /workspace/home/.hermes/.env \
-                /workspace/home/.kube/config \
-                /workspace/home/.netrc \
-                /workspace/home/.npmrc \
-                /workspace/home/.pypirc
-          command:
-            - sh
-            - -ec
-          image: ghcr.io/gke-labs/kube-agents/platform-agent:latest
-          imagePullPolicy: Always
-          name: sandbox-credential-cleanup
-          resources:
-            limits:
-              cpu: 200m
-              memory: 256Mi
-            requests:
-              cpu: 100m
-              memory: 128Mi
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
-            readOnlyRootFilesystem: true
-          volumeMounts:
-            - mountPath: /workspace
-              name: platform-agent-data-vol
         - command:
             - /usr/local/bin/start-services
           env:
@@ -803,7 +804,9 @@ spec:
             - name: API_SERVER_KEY
               value: cluster-internal-trusted
             - name: CREDENTIAL_PROXY_SCOPED_SA_POOL
-              value: "0"
+              value: "1"
+            - name: CREDENTIAL_PROXY_SCOPED_SA_POOL_FILE
+              value: /etc/credential-proxy/scoped-sa-pool.json
             - name: AGENT_API_PROXY_PORT
               value: "8643"
             - name: AGENT_API_UPSTREAM_KEY
@@ -811,9 +814,8 @@ spec:
             - name: API_SERVER_EXTERNAL_KEY
               valueFrom:
                 secretKeyRef:
-                  key: API_SERVER_KEY
-                  name: platform-agent-secrets
-                  optional: true
+                  key: api-key
+                  name: platformagent-secrets
             - name: SESSION_KV_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -836,14 +838,18 @@ spec:
                 gcloud container clusters get-credentials "$GKE_CLUSTER_NAME" --location "$GKE_LOCATION" --project "$GKE_PROJECT_ID" &&
                 kubectl config use-context "$KUBE_CONTEXT_NAME" >/dev/null &&
                 kubectl config set-context "$KUBE_CONTEXT_NAME" --namespace="$KUBE_DEFAULT_NAMESPACE" >/dev/null
+            - name: GOOGLE_CHAT_PROJECT_ID
+              value: kube-agents-gkedemos
+            - name: GOOGLE_CHAT_SUBSCRIPTION_NAME
+              value: projects/kube-agents-gkedemos/subscriptions/kubeagents-google-chat-events-sub
             - name: CREDENTIAL_PROXY_WORKSPACE_ROOT
               value: /opt/data
             - name: EVENT_WATCHER_CLUSTER_NAME
               value: cluster-a
             - name: EVENT_WATCHER_ENABLED
               value: "true"
-          image: ghcr.io/gke-labs/kube-agents/credential-proxy:latest
-          imagePullPolicy: Always
+          image: ghcr.io/gke-labs/kube-agents/credential-proxy:v9.9.9
+          imagePullPolicy: IfNotPresent
           name: envoy-credential-proxy
           ports:
             - containerPort: 8765
@@ -860,7 +866,6 @@ spec:
                 - http://127.0.0.1:8765/healthz
             initialDelaySeconds: 5
             periodSeconds: 15
-          restartPolicy: Always
           resources:
             limits:
               cpu: "2"
@@ -897,6 +902,49 @@ spec:
               name: event-watcher-ksa-token
               readOnly: true
             - mountPath: /opt/data
+              name: platform-agent-data-vol
+            - mountPath: /etc/credential-proxy/scoped-sa-pool.json
+              name: credential-proxy-policy
+              readOnly: true
+              subPath: scoped-sa-pool.json
+      initContainers:
+        - args:
+            - |-
+              rm -rf -- \
+                /workspace/home/.config/gcloud \
+                /workspace/home/.config/gh \
+                /workspace/home/.aws/credentials \
+                /workspace/home/.aws/cli/cache \
+                /workspace/home/.aws/sso/cache \
+                /workspace/home/.azure \
+                /workspace/home/.docker/config.json \
+                /workspace/home/.git-credentials \
+                /workspace/home/.hermes/.env \
+                /workspace/home/.kube/config \
+                /workspace/home/.netrc \
+                /workspace/home/.npmrc \
+                /workspace/home/.pypirc
+          command:
+            - sh
+            - -ec
+          image: ghcr.io/gke-labs/kube-agents/platform-agent:v9.9.9
+          imagePullPolicy: IfNotPresent
+          name: sandbox-credential-cleanup
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - mountPath: /workspace
               name: platform-agent-data-vol
       securityContext:
         fsGroup: 10000
@@ -1121,7 +1169,7 @@ spec:
       to:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: otel-collector
+              kubernetes.io/metadata.name: gke-managed-otel
     - ports:
         - port: 8080
           protocol: TCP
