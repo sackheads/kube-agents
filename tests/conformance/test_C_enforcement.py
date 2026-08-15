@@ -232,13 +232,46 @@ class C1IsolationIsStructural(unittest.TestCase):
         because the execution happens on the privileged side. It dissolves the
         boundary every other control leans on.
 
-        The fix is four environment variables in `CommandExecutor.environment`,
-        which is what this asserts. An open git-hardening slice may close it.
+        The fix is a set of pins in `CommandExecutor.environment`, which is
+        what this asserts. An open git-hardening slice may close it.
+
+        What this deliberately does NOT assert is a particular
+        `GIT_CONFIG_GLOBAL`. It used to demand `/dev/null`, and that was a
+        mistake of shape rather than of substance: it pinned one imagined fix
+        instead of the property. The branch that actually closes this points
+        the variable at a broker-owned `.gitconfig`, because `gh auth
+        setup-git` writes the GitHub credential helper into that file and
+        /dev/null severs authenticated push and fetch without hardening
+        anything. Had the assertion stayed, the gap would have closed while
+        this test went on failing on the wrong clause -- a permanent expected
+        failure that never flips, which is precisely the signal this suite
+        exists to give. Asserting the controls, not the spelling.
+
+        `core.hooksPath` is read out of the GIT_CONFIG_COUNT layer rather than
+        a config file because that layer outranks every file, including a
+        `.git/config` the agent can write.
         """
         environment = _executor().environment
         self.assertEqual("1", environment.get("GIT_CONFIG_NOSYSTEM"))
-        self.assertEqual("/dev/null", environment.get("GIT_CONFIG_GLOBAL"))
         self.assertEqual("https", environment.get("GIT_ALLOW_PROTOCOL"))
+
+        forced = {
+            environment.get(f"GIT_CONFIG_KEY_{index}"): environment.get(
+                f"GIT_CONFIG_VALUE_{index}"
+            )
+            for index in range(int(environment.get("GIT_CONFIG_COUNT") or 0))
+        }
+        self.assertIn(
+            "core.hooksPath",
+            forced,
+            "a hook is a command git runs from a repository the agent writes",
+        )
+        self.assertTrue(
+            (environment.get("GIT_CONFIG_GLOBAL") or "").strip(),
+            "the global config layer must be pinned somewhere the agent cannot "
+            "write; which path is the hardening slice's call, but unset means "
+            "git falls back to $HOME/.gitconfig",
+        )
 
     @h.known_violation("C1", "slice-2b/findings.md 1.4 (see gke-labs/kube-agents#676)")
     def test_C1_the_rendered_egress_policy_is_default_deny(self) -> None:
@@ -299,12 +332,23 @@ class C1IsolationIsStructural(unittest.TestCase):
         """KNOWN VIOLATION. The sandbox reaches the metadata server anyway.
 
         This is the invariant `spec.security.egressPolicy: Allowlist` exists to
-        establish, and on this tree it does not hold. platformagent-gateway-netpol
-        allows 169.254.169.254/32 on TCP 80 and 8080 -- the metadata server's own
-        ports -- and 169.254.169.252/32 on 988, and it selects the same
-        `app: platformagent-gateway` pods that platformagent-sandbox-metadata-deny
-        selects. Two policies over one Pod union their allow-sets, so opting into
-        the allowlist does not subtract what the other policy adds.
+        establish, and on this tree it does not hold -- on both delivery paths,
+        which is worth stating because checking only one is how this was
+        nearly missed:
+
+        - Operator-rendered: platformagent-gateway-netpol allows
+          169.254.169.254/32 on TCP 80 and 8080 -- the metadata server's own
+          ports -- and 169.254.169.252/32 on 988, selecting the same
+          `app: platformagent-gateway` pods that
+          platformagent-sandbox-metadata-deny selects.
+        - Kustomize-mode: deploy/kustomize/platform/networkpolicy-core-egress.yaml
+          ships platform-agent-core-egress with the same two metadata rules. It
+          selects on `app.kubernetes.io/name: platform-agent` rather than the
+          `app:` label, a different expression over the same Pods, which the
+          agent carries both of.
+
+        Two policies over one Pod union their allow-sets, so opting into the
+        allowlist does not subtract what either of them adds.
 
         The failure is real and the feature does not currently do what its name
         says. Recorded here rather than repaired because #676 was deliberate:
