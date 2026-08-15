@@ -13,6 +13,7 @@ import io
 import json
 import logging
 import os
+import base64
 import queue
 import re
 import shlex
@@ -1066,6 +1067,9 @@ _GIT_GLOBAL_WITH_VALUE = frozenset(
 # claim than "exists, empty, and not writable by the agent".
 GIT_HOOKS_DISABLED_DIR = "git-hooks-disabled"
 
+# Broker-owned git trees, under the state dir rather than the shared workspace.
+CONTENT_WORKSPACE_DIR = "content-workspaces"
+
 # Config keys forced onto every git invocation, as the `GIT_CONFIG_COUNT`
 # layer. That layer outranks system, global and repo-local config, which is
 # the point: the agent owns the working tree, so `.git/config` is a file it
@@ -1124,6 +1128,9 @@ def _git_forced_config_environment(pairs: tuple[tuple[str, str], ...]) -> dict[s
     missing config key GIT_CONFIG_KEY_1`, exit 128), and a count *lower*
     silently ignores the tail, disarming the last pin with nothing to see.
     Building both from one sequence is what keeps them in step.
+    `[0, GIT_CONFIG_COUNT)`, and stops at the first index it cannot parse — so
+    the count has to match the pairs exactly or the tail is silently dropped.
+    Building it from one sequence is what keeps them in step.
     """
     environment = {"GIT_CONFIG_COUNT": str(len(pairs))}
     for index, (key, value) in enumerate(pairs):
@@ -1204,6 +1211,9 @@ _GIT_REFUSED_ARGUMENTS = {
     # list is matched across the whole argv, so refusing `-u` would refuse all
     # four spellings on every verb, to close a vector the protocol allowlist
     # already holds shut. That trade is not worth making blind. The
+    # list: `clone -u <cmd>` is `--upload-pack`, but `-u` is also `git push -u`
+    # and `git add -u`, which the skills do issue, so refusing it would break
+    # shipped work to close a vector the protocol allowlist already holds. The
     # consequence is precise — widen GIT_ALLOW_PROTOCOL to `file` and `clone -u`
     # is arbitrary code execution again even though `--upload-pack` is refused.
     # Do not widen it without revisiting this.
@@ -1276,6 +1286,47 @@ _GIT_REFUSED_SUBCOMMANDS = {
     "foreach": "runs a command the caller names in each submodule",
 }
 
+# Refused short options, matched anywhere inside a single-dash token. git lets
+# a short option carry its value attached (`-O/opt/data/payload`) and lets
+# several cluster into one argument (`-iO/opt/data/payload`, `-fx<cmd>`), so
+# matching the whole token against `-O` catches only the tidiest spelling of
+# the attack — `git grep -iO<cmd>` is one byte longer and was demonstrated
+# executing past a matcher that only handled the attached form.
+#
+# Any single-dash token containing one of these letters is refused, without
+# working out which letter consumes the value. Working that out means knowing
+# each subcommand's option table, and this file has already been wrong once
+# about agreeing with git's parser. The over-refusal is real but empty: the
+# only clustered short option in shipped git argv is `clean -fdq`
+# (`gitops_workspace.py:548`), and no shipped call attaches a value to a short
+# one. Checked against the tree, not against another comment — the first draft
+# of this note also claimed `git rm -rf`, which nothing issues.
+
+# Short options whose meaning depends on the subcommand, refused only when that
+# subcommand appears in the argv. `git config -f <path>` is `--file`, but `-f`
+# on every other verb is `--force`, which the skills issue (`clean -fdq`,
+# `push -f`). Scoping by "the subcommand token is present anywhere" is coarse
+# on purpose — it does not require deciding where the options end, only that a
+# `git clean -f` whose pathspec happens to be the word `config` is refused.
+
+# Subcommands whose entire purpose is to run a command the caller names. None
+# needs a config file, a shared-volume write or a lease, and none is in
+# `GIT_MUTATING_SUBCOMMANDS`. Demonstrated through the proxy from inside a
+# valid lease: `git bisect start HEAD HEAD~1` then `git bisect run <payload>`
+# executes <payload> in the credential container, as do
+# `filter-branch --tree-filter` and `send-email --smtp-server=<path>`.
+#
+# **This is a denylist over a set that is not closed, and it is the weakest
+# thing in this file.** git keeps a command in configuration for `difftool`,
+# `mergetool`, `web--browse`, `instaweb`, `help -w`, and the `p4`/`svn`
+# bridges, and a new one can arrive in any release. The structurally correct
+# fix is to allowlist the ~20 subcommands the product actually issues and fail
+# closed on the rest, which is a change to the denylist-not-allowlist decision
+# recorded above `GIT_MUTATING_SUBCOMMANDS` — that decision weighed an
+# unknown *read* verb failing closed against a concurrency race, and was not
+# weighing it against arbitrary code execution. Revisit it with that evidence
+# rather than treating this list as sufficient.
+
 
 # The long options above, for the abbreviation match in `_git_refused_name`.
 _GIT_REFUSED_LONG = tuple(
@@ -1329,6 +1380,68 @@ def _git_refused_name(argument: str) -> str:
     return next(
         (full for full in _GIT_REFUSED_LONG if full.startswith(name)), name
     )
+# argv-level config and code injection, refused as a backup to the environment.
+#
+# `-c` and `--config-env` set config at a layer that outranks the
+# `GIT_CONFIG_COUNT` pins above — verified: `git -c core.hooksPath=<dir>` wins
+
+#
+# The first three are config and code injection, and they are the backup to the
+# environment hardening — except for hooks, where `-c` beats the
+# `GIT_CONFIG_COUNT` layer outright and this is the only control there is.
+#
+# The last two are containment, not configuration. `_execute` refuses a `cwd`
+# outside the shared workspace and `git_lease_violation` resolves `cwd` plus
+
+
+# The long options above, for the abbreviation match in `_git_refused_name`.
+
+
+def _git_refused_name(argument: str) -> str:
+    """The refused option `argument` spells, or `argument` itself.
+
+    Three spellings have to collapse to one name, because git accepts all
+    three and a checker that recognises fewer than git accepts is a parser
+    differential — D15, and the only kind of bug this project has shipped.
+
+    1. `--flag=value`, handled by splitting on the first `=`.
+    2. `-Ovalue` and `-iOvalue`, the attached and clustered short forms,
+       handled by `_GIT_REFUSED_SHORT` against every letter in the token.
+    3. **`--fl`, an abbreviation.** git's *subcommand* options go through
+       parse-options, which accepts any unambiguous prefix, so `git rebase
+       --exe <cmd>` and `git config --glo alias.zz '!<cmd>'` both run. Both
+       were demonstrated executing against a checker that matched the full
+       spelling only, the second of them reinstating a vector this file had
+       already closed. Note the asymmetry that makes this easy to miss: git's
+       *own* options — `--git-dir`, `--exec-path`, `--config-env` — are parsed
+       by hand in git.c with exact comparisons and are **not** abbreviable, so
+       testing only those spellings suggests the problem does not exist.
+
+    An argument is refused when it is a prefix of a refused option, which is
+    strictly more conservative than git: git takes a prefix only when it is
+    unambiguous among the options that subcommand defines, and this does not
+    know the subcommand. Deliberately so — deciding ambiguity here would mean
+    reimplementing parse-options and agreeing with it forever. The cost is
+    refusing `--g`, `--ex` and the like as literal arguments, which nothing
+    sends. Note the direction: `--oneline` is *not* refused, because it is not
+    a prefix of anything on the list; only `--o` and `--op` would be.
+    """
+    if argument.startswith("-") and not argument.startswith("--"):
+        refused = _GIT_REFUSED_SHORT.intersection(argument[1:])
+        if refused:
+            return f"-{sorted(refused)[0]}"
+    name = argument.split("=", 1)[0]
+    if name in _GIT_REFUSED_ARGUMENTS or not name.startswith("--"):
+        return name
+    if name == "--":
+        # The end-of-options separator, not an abbreviation of anything. It is
+        # a prefix of every long option, so without this it matches the first
+        # entry on the list and refuses `git add -- clusters/prod`, which the
+        # fleet-audit skill issues. Caught by the over-refusal test below it.
+        return name
+    return next(
+        (full for full in _GIT_REFUSED_LONG if full.startswith(name)), name
+    )
 
 
 def git_argument_violation(argv: list[str]) -> str | None:
@@ -1340,6 +1453,9 @@ def git_argument_violation(argv: list[str]) -> str | None:
     where the options end is a *guess* about git's parser, and every Critical
     this project has found was a checker and an executor parsing the same input
     differently. Scanning everything cannot disagree with git about scope.
+    where the options end is a *guess* about git's parser, and the three
+    Criticals this project has found were all a checker and an executor parsing
+    the same argv differently. Scanning everything cannot disagree.
 
     The cost is refusing a git command with a literal `-c` somewhere in its
     arguments — a commit message, a pathspec. Nothing shipped does that, and a
@@ -1408,6 +1524,28 @@ def _git_plan(argv: list[str]) -> tuple[str | None, list[str]]:
     return None, directories
 
 
+def _within(root: Path, candidate: Path) -> bool:
+    return candidate == root or root in candidate.parents
+
+
+def content_workspace_enabled() -> bool:
+    """Is broker-owned, content-passed git armed?
+
+    Off by default, and it stays off until the skills are migrated in a reviewed
+    change. Both halves run side by side in the meantime: `/v1/exec` keeps
+    accepting a directory from the agent exactly as it does today, so turning
+    this on adds a door rather than moving one. That is deliberate — the
+    mechanism lands, the migration is a separate diff, and neither has to be
+    reverted to fix the other.
+    """
+    return os.getenv("CREDENTIAL_PROXY_CONTENT_WORKSPACE", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 class CommandExecutor:
     ALLOWED_EXECUTABLES = ("gcloud", "kubectl", "gh", "git")
 
@@ -1441,6 +1579,24 @@ class CommandExecutor:
         # because the agent never had a handle on the document at all.
         self.kubeconfig_dir = self.state_dir / "kubeconfigs"
         self.git_hooks_dir = self.state_dir / GIT_HOOKS_DISABLED_DIR
+        # Where broker-owned git trees live when content-passing is armed.
+        # Under the state dir, never under `workspace_dir`: the state dir is the
+        # broker's own emptyDir and the workspace is the volume the agent
+        # writes. `ContentWorkspaceStore` re-proves that separation at
+        # construction and refuses to start if a future mount layout collapses
+        # it — see `content_workspace.assert_disjoint_roots`. None when the
+        # feature is off, which is what makes `execute_workspace_git`
+        # unreachable rather than merely unused.
+        # Resolved, like `workspace_dir` and unlike the other state paths: it is
+        # compared against a resolved `cwd` in `_execute`, and on a filesystem
+        # with a symlinked prefix an unresolved root never matches — the
+        # containment check would refuse every legitimate call and the feature
+        # would look broken rather than closed.
+        self.content_workspace_root = (
+            (self.state_dir / CONTENT_WORKSPACE_DIR).resolve()
+            if content_workspace_enabled()
+            else None
+        )
         # git reads its global config from $HOME/.gitconfig, and $HOME is the
         # sidecar-only state dir, so the agent cannot open the file directly.
         # It can still *write* it through the proxy unless `git config
@@ -1449,6 +1605,10 @@ class CommandExecutor:
         # Naming the path explicitly means the location stays fixed if the
         # mounts are ever rearranged — the same argument the KUBECTL_KUBERC
         # line below makes, and the one slice 2b made about the broker's HOME.
+        # sidecar-only state dir, so the file is already out of the agent's
+        # reach. Naming it explicitly means that stays true if the mounts are
+        # ever rearranged — the same argument the KUBECTL_KUBERC line below
+        # makes, and the same one slice 2b had to make about the broker's HOME.
         # It is deliberately not /dev/null: `gh auth setup-git` writes the
         # GitHub credential helper into *this* file via `git config --global`,
         # so pointing it at /dev/null does not harden anything, it just severs
@@ -1464,6 +1624,11 @@ class CommandExecutor:
             self.kube_dir,
             self.kubeconfig_dir,
             self.git_hooks_dir,
+            *(
+                (self.content_workspace_root,)
+                if self.content_workspace_root is not None
+                else ()
+            ),
         ):
             path.mkdir(parents=True, exist_ok=True)
         # Re-applied on every start rather than only at creation: the state dir
@@ -1533,6 +1698,24 @@ class CommandExecutor:
             # clone and both become arbitrary code execution again. They are on
             # the argv refusal list below so that widening is survivable, but
             # anyone reaching for `https:file` should read that list first.
+            "GIT_ALLOW_PROTOCOL": "https",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": str(self.git_config_global),
+            # An editor is a command git runs, and `core.editor` is settable
+            # from the `.git/config` the agent can write. `git commit` with no
+            # `-m` and `git tag -a` with no `-m` both launch it — argv the
+            # skills nearly send already. These two variables outrank
+            # `core.editor`/`sequence.editor` from every config layer including
+            # `-c`, verified the same way GIT_ALLOW_PROTOCOL was, so this is a
+            # boundary rather than a pin. `false` rather than empty: git treats
+            # an unset editor as "fall back to vi", and an editor that exits
+            # non-zero is how a non-interactive container should fail. Nothing
+            # is lost — there is no terminal here, so a commit that needs an
+            # editor could never have succeeded.
+            "GIT_EDITOR": "false",
+            "GIT_SEQUENCE_EDITOR": "false",
+            # them from a fixed https prefix); note this does refuse the `file`
+            # protocol, so a local-path clone would need `https:file`.
             "GIT_ALLOW_PROTOCOL": "https",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": str(self.git_config_global),
@@ -1681,8 +1864,54 @@ class CommandExecutor:
         """Run a trusted, operator-defined helper that is not agent selectable."""
         return self._execute(argv, cwd=cwd)
 
+    def execute_workspace_git(self, argv: list[str], cwd: Path) -> ExecutionResult:
+        """git the broker issues on its own behalf, in a tree the agent cannot name.
+
+        A separate door from `/v1/exec`, and separate on purpose. The point of
+        content-passing is that the agent no longer spells `git` at all; if the
+        broker's own plumbing went through the agent-facing path, every
+        subcommand that plumbing needs would have to be permitted to the agent
+        too, and the allowlist D17 is about would land at eighteen entries
+        instead of none. Keeping the two apart is what makes the agent-facing
+        answer "git is not reachable" rather than "git is reachable, narrowly".
+
+        Three things are enforced here rather than assumed:
+
+        * the subcommand is one of the eleven this product issues, checked
+          against the argv as parsed rather than as composed, so a later edit
+          that threads a caller's string into one of these vectors is refused
+          instead of run;
+        * `-C` is refused outright — it is a working-directory redirect, and the
+          containment below is the only reason this path is safe;
+        * the working directory is inside the *content workspace* root, which
+          `assert_disjoint_roots` has already proven is not inside the volume
+          the agent writes to.
+        """
+        from content_workspace import WORKSPACE_GIT_SUBCOMMANDS
+
+        if self.content_workspace_root is None:
+            raise RuntimeError("content workspace support is not enabled")
+        if not argv or argv[0] != "git":
+            raise ValueError("only git runs on the workspace path")
+        executable_path = self.executables.get("git")
+        if not executable_path:
+            raise RuntimeError("supported executable is unavailable: git")
+        subcommand, redirects = _git_plan(argv)
+        if redirects:
+            raise ValueError("`-C` is not accepted on the workspace path")
+        if subcommand not in WORKSPACE_GIT_SUBCOMMANDS:
+            raise ValueError(
+                f"`git {subcommand}` is not one of the subcommands the broker "
+                "issues on its own behalf"
+            )
+        return self._execute(
+            [executable_path, *argv[1:]],
+            cwd=str(cwd),
+            containment_root=self.content_workspace_root,
+        )
+
     def _within_workspace(self, candidate: Path) -> bool:
-        return candidate == self.workspace_dir or self.workspace_dir in candidate.parents
+        return _within(self.workspace_dir, candidate)
 
     def _lease_holder(self, candidate: Path) -> Path | None:
         """The nearest ancestor of `candidate` that holds a lease marker."""
@@ -1925,21 +2154,29 @@ class CommandExecutor:
         stdin: str | None = None,
         cwd: str | None = None,
         kubeconfig_path: Path | None = None,
+        containment_root: Path | None = None,
     ) -> ExecutionResult:
         """Run a command. `kubeconfig_path` is already resolved and trusted.
 
         Callers hand this an absolute path the proxy itself owns; containment and
         regeneration happen in `execute` so that nothing reaching this point is
         still caller-controlled.
+
+        `containment_root` names which root the working directory must be inside
+        of. It defaults to the agent-shared workspace, which is every existing
+        caller. `execute_workspace_git` passes the broker-owned content
+        workspace root instead — the two roots are proven disjoint at startup,
+        so widening the check here cannot widen the other path.
         """
         started = time.monotonic()
-        timed_out = False
-        command_cwd = self.workspace_dir
+        root = containment_root or self.workspace_dir
+        command_cwd = root
         if cwd:
             requested_cwd = Path(cwd).resolve()
-            if not self._within_workspace(requested_cwd):
+            if not _within(root, requested_cwd):
                 raise ValueError("working directory is outside the shared workspace")
             command_cwd = requested_cwd
+        timed_out = False
         command_environment = self.environment.copy()
         if argv and Path(argv[0]).name == "git":
             command_environment.update(self.git_identity)
@@ -1983,6 +2220,32 @@ class CommandExecutor:
         if len(value) <= self.max_output_bytes:
             return value, False
         return value[: self.max_output_bytes], True
+
+
+def build_workspace_store(executor: CommandExecutor):
+    """The content-passing store, or None when the feature is off.
+
+    Returning None rather than an inert object is deliberate: the handler tests
+    `workspaces is None` to decide whether the routes exist at all, so "off"
+    means the endpoints are absent, not present-and-refusing. An absent endpoint
+    cannot be reached by a bug in a refusal.
+
+    A failure to construct — which today means only `assert_disjoint_roots`
+    refusing overlapping roots — is fatal rather than a downgrade to off. An
+    operator who asked for content-passing and silently got the directory path
+    back would believe they had a property they do not have.
+    """
+    if executor.content_workspace_root is None:
+        return None
+    from content_workspace import ContentWorkspaceStore
+
+    store = ContentWorkspaceStore(
+        executor.content_workspace_root,
+        executor.workspace_dir,
+        executor.execute_workspace_git,
+    )
+    LOGGER.info("content workspace enabled root=%s", executor.content_workspace_root)
+    return store
 
 
 def read_only_enforced() -> bool:
@@ -2063,6 +2326,11 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
     enforce_read_only: bool = True
     chat_relay: GoogleChatRelay | None = None
     slack_relay: SlackRelay | None = None
+    # None unless CREDENTIAL_PROXY_CONTENT_WORKSPACE is on. While it is None the
+    # /v1/workspace/* routes answer 404 — the same answer an older broker gives,
+    # which is what lets a migrating client detect support by asking rather than
+    # by version-sniffing.
+    workspaces: object | None = None
     # Replaced by serve(). The default keeps the sidecar deployment, where the
     # Unix socket is the access control, behaving as it did before there was an
     # authenticator at all.
@@ -2144,6 +2412,9 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/v1/github/refresh":
             self._handle_github_refresh()
+            return
+        if self.path.startswith("/v1/workspace/"):
+            self._handle_workspace_post()
             return
         if self.path != "/v1/exec":
             self._json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
@@ -2326,6 +2597,104 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
                 "timedOut": result.timed_out,
             },
         )
+
+    def _handle_workspace_post(self) -> None:
+        """The content-passing routes: bytes in, bytes out, never a path.
+
+        Every response here is content or a name. Nothing returns a filesystem
+        path, because a path handed back is a directory the agent can be told to
+        `cd` into — which is precisely the arrangement this replaces. The
+        `handle` is a broker-minted opaque token, not a location.
+
+        These routes deliberately do **not** go through `Policy.blocked_by`,
+        `git_argument_violation` or `git_lease_violation`. Those three inspect an
+        argv the caller composed; here the caller composes no argv at all. The
+        equivalent controls are structural: `content_workspace.repo_relative`
+        decides what a path may name, `CommandExecutor.execute_workspace_git`
+        decides which git may run, and neither reads a caller string into a
+        command position.
+        """
+        import content_workspace
+
+        if self.workspaces is None:
+            self._json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+            return
+        route = self.path[len("/v1/workspace/") :]
+        try:
+            payload = self._read_json_body(
+                max_bytes=max(
+                    self.max_request_bytes,
+                    content_workspace.max_total_bytes() * 2,
+                )
+            )
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+
+        try:
+            body = self._workspace_route(route, payload)
+        except content_workspace.ContentWorkspaceError as exc:
+            LOGGER.warning(
+                "workspace request refused route=%s code=%s", route, exc.code
+            )
+            self._json(
+                HTTPStatus(exc.status),
+                {"status": "blocked", "code": exc.code, "message": str(exc)},
+            )
+            return
+        except ValueError as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        except Exception as exc:
+            LOGGER.exception("workspace request failed route=%s type=%s", route, type(exc).__name__)
+            self._json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "credential proxy workspace operation failed"},
+            )
+            return
+        if body is None:
+            self._json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+            return
+        self._json(HTTPStatus.OK, body)
+
+    def _workspace_route(self, route: str, payload: dict) -> dict | None:
+        import content_workspace
+
+        store = self.workspaces
+        if route == "open":
+            workspace = store.open(payload.get("repo"), payload.get("base") or None)
+            return {
+                "handle": workspace.handle,
+                "repo": workspace.repo,
+                "base": workspace.base,
+                "baseSha": workspace.base_sha,
+            }
+        if route == "read":
+            content = store.read(payload.get("handle"), payload.get("path"))
+            return {
+                "path": payload.get("path"),
+                "contentBase64": base64.b64encode(content).decode("ascii"),
+                "size": len(content),
+            }
+        if route == "list":
+            return {
+                "entries": store.list(payload.get("handle"), payload.get("prefix") or None)
+            }
+        if route == "commit":
+            changes = content_workspace.parse_changes(payload.get("changes"))
+            return store.commit(
+                payload.get("handle"),
+                payload.get("branch"),
+                payload.get("message"),
+                changes,
+                expected_base_sha=payload.get("expectedBaseSha") or None,
+            )
+        if route == "push":
+            return store.push(payload.get("handle"), payload.get("branch"))
+        if route == "close":
+            store.close(payload.get("handle"))
+            return {"closed": True}
+        return None
 
     def _handle_github_refresh(self) -> None:
         try:
@@ -2585,6 +2954,7 @@ def serve(args: argparse.Namespace) -> None:
     )
     executor.bootstrap(os.getenv("CREDENTIAL_PROXY_BOOTSTRAP_COMMAND", ""))
     CredentialProxyHandler.executor = executor
+    CredentialProxyHandler.workspaces = build_workspace_store(executor)
     CredentialProxyHandler.max_request_bytes = args.max_request_bytes
     CredentialProxyHandler.enforce_read_only = read_only_enforced()
     LOGGER.info("read-only enforcement enabled=%s", CredentialProxyHandler.enforce_read_only)
