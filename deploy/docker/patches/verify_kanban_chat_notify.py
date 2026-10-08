@@ -44,8 +44,12 @@ GCHAT = None
 
 FAKE_A2A = """#!/bin/sh
 printf '%s\\n' "$@" > "$A2A_ARGV_LOG"
+printf '%s' "${A2A_STDOUT:-}"
 exit "${A2A_EXIT:-0}"
 """
+# What `a2a notify` prints when an armed gateway refuses a request: the probe
+# reads exit 1 as up only when the gateway answered.
+GATEWAY_REFUSAL = '{"error":"text is empty"}' 
 
 
 class _Runner:
@@ -108,6 +112,7 @@ def main() -> None:
     os.environ["PATH"] = f"{tmp}:{os.environ['PATH']}"
     os.environ["A2A_ARGV_LOG"] = str(log)
     os.environ["A2A_EXIT"] = "1"
+    os.environ["A2A_STDOUT"] = GATEWAY_REFUSAL
     os.environ["HERMES_HOME"] = tmp
 
     os.environ[NOTIFY_PLATFORM_ENV] = "google_chat"

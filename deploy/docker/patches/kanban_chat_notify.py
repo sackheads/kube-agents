@@ -45,7 +45,9 @@ When the route is not there (the gateway restarting, its route unarmed, the
 bus unreachable: ``a2a notify`` exit 4), :func:`resolve` answers no adapter,
 which is upstream's disconnected-adapter path: skipped without a claim and
 without spending the failure budget. It learns this from a probe (an empty
-notify, which an armed gateway refuses at once) that the collector's pre-claim
+notify, which an armed gateway refuses at once; a failure the gateway did not
+answer, such as a login the auth callout could not decide, also reads as down)
+that the collector's pre-claim
 authorization runs on its worker thread, and from any send that meets exit
 4. An up answer is trusted for :data:`ROUTE_PROBE_TTL_SECONDS`; a down one
 holds the route down for :data:`ROUTE_DOWN_BACKOFF_SECONDS` and is probed
@@ -70,6 +72,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import subprocess
 import time
@@ -147,9 +150,17 @@ def routes(platform: Any) -> bool:
 
 
 def active_platforms(names: set) -> set:
-    """``names`` plus the routed platform, when there is one."""
+    """``names`` plus the routed platform, when there is one.
+
+    Runs on every collector construction, route up or down, so it is where
+    the install's first routed tick is recorded (:func:`routed_since`), before
+    any probe or claim.
+    """
     routed = routed_platform()
-    return names | {routed} if routed else names
+    if not routed:
+        return names
+    routed_since(time.time())
+    return names | {routed}
 
 
 def resolve(runner: Any, platform: Any, adapter: Any, sub: Optional[dict] = None) -> Any:
@@ -169,45 +180,56 @@ def resolve(runner: Any, platform: Any, adapter: Any, sub: Optional[dict] = None
     return stand_in
 
 
-def routed_since(now: float) -> float:
+def routed_since(now: float) -> Optional[float]:
     """When routed delivery first went live on this install: read, or recorded as ``now``.
 
-    Kept under $HERMES_HOME so it survives a restart. When it cannot be kept,
-    this process's first call stands in, and the log says a restart moves it.
+    Kept under $HERMES_HOME so it survives a restart, written whole (a temp
+    file renamed over it) so a kill mid-write leaves the old record or none.
+    When it cannot be kept, this process's first call stands in, and the log
+    says a restart moves it. A record that is there but unreadable answers
+    None, which skips nothing: the skip is a nicety and a wrong cutoff drops
+    events.
     """
     global _routed_since
     if _routed_since is not None:
         return _routed_since
     home = os.environ.get(HERMES_HOME_ENV, "").strip()
     path = os.path.join(home, ROUTED_SINCE_FILE) if home else ""
-    value = None
     if path:
         try:
             with open(path, encoding="utf-8") as handle:
                 value = float(handle.read().strip())
+            if not math.isfinite(value):
+                raise ValueError(f"{value} is not a time")
+            _routed_since = value
+            return value
         except FileNotFoundError:
             pass
         except (OSError, ValueError) as exc:
-            logger.warning("kanban notifier: %s unreadable (%s); recording now", path, exc)
-    if value is None:
-        value = now
-        try:
-            if not path:
-                raise OSError(f"{HERMES_HOME_ENV} is not set")
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.write(f"{value}\n")
-        except OSError as exc:
-            logger.warning("kanban notifier: cannot record when routed delivery went live (%s); "
-                           "a restart will skip stale events again", exc)
-    _routed_since = value
-    return value
+            logger.warning("kanban notifier: %s unreadable (%s); skipping no events for age", path, exc)
+            return None
+    try:
+        if not path:
+            raise OSError(f"{HERMES_HOME_ENV} is not set")
+        partial = f"{path}.tmp"
+        with open(partial, "w", encoding="utf-8") as handle:
+            handle.write(f"{now}\n")
+        os.replace(partial, path)
+    except OSError as exc:
+        logger.warning("kanban notifier: cannot record when routed delivery went live (%s); "
+                       "a restart will skip stale events again", exc)
+    _routed_since = now
+    return now
 
 
 def fresh_events(claim: Optional[dict], now: Optional[float] = None) -> Optional[dict]:
     """``claim`` minus events already STALE_EVENT_SECONDS old when routing went live, for the routed platform only."""
     if not claim or not routes((claim.get("sub") or {}).get("platform")):
         return claim
-    cutoff = routed_since(time.time() if now is None else now) - STALE_EVENT_SECONDS
+    since = routed_since(time.time() if now is None else now)
+    if since is None:
+        return claim
+    cutoff = since - STALE_EVENT_SECONDS
     events = claim.get("events") or []
     kept = [ev for ev in events if (getattr(ev, "created_at", 0) or 0) >= cutoff]
     if len(kept) != len(events):
@@ -217,6 +239,16 @@ def fresh_events(claim: Optional[dict], now: Optional[float] = None) -> Optional
                     claim["sub"].get("task_id"), claim["sub"].get("platform"))
         claim = dict(claim, events=kept)
     return claim
+
+
+def gateway_answered(stdout: Any) -> bool:
+    """Whether `a2a notify`'s stdout carries the gateway's JSON answer (it prints it before any refusal)."""
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode(errors="replace")
+    try:
+        return isinstance(json.loads(str(stdout or "").strip() or "null"), dict)
+    except ValueError:
+        return False
 
 
 class ChatNotifyAdapter(BasePlatformAdapter):
@@ -275,6 +307,13 @@ class ChatNotifyAdapter(BasePlatformAdapter):
         if done.returncode == NOTIFY_ROUTE_UNAVAILABLE:
             logger.warning("chat.notify: route unavailable; holding deliveries for %ds", ROUTE_DOWN_BACKOFF_SECONDS)
             return False
+        if not gateway_answered(done.stdout):
+            # A failure the gateway did not answer (a login the auth callout
+            # could not decide, during its outage, reads as a refusal) says
+            # nothing about the route: hold rather than spend the budget.
+            logger.warning("chat.notify: route probe got no answer from the gateway (exit %d); holding deliveries for %ds",
+                           done.returncode, ROUTE_DOWN_BACKOFF_SECONDS)
+            return False
         return True
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -322,7 +361,7 @@ class ChatNotifyAdapter(BasePlatformAdapter):
         if proc.returncode == NOTIFY_OUTCOME_UNKNOWN:
             logger.warning("chat.notify: no answer in time for %s; treating as sent", chat_id)
             return SendResult(success=True)
-        if proc.returncode == NOTIFY_ROUTE_UNAVAILABLE:
+        if proc.returncode == NOTIFY_ROUTE_UNAVAILABLE or (proc.returncode != 0 and not gateway_answered(out)):
             self.mark_route_down()
             logger.warning("chat.notify: route unavailable; holding deliveries for %ds", ROUTE_DOWN_BACKOFF_SECONDS)
         if proc.returncode != 0:

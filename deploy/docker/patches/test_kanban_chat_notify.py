@@ -64,6 +64,8 @@ from gateway.config import Platform  # noqa: E402
 
 ROUTED = {kanban_chat_notify.NOTIFY_PLATFORM_ENV: "google_chat"}
 UNROUTED = {kanban_chat_notify.NOTIFY_PLATFORM_ENV: ""}
+# What `a2a notify` prints when an armed gateway refuses the empty probe.
+GATEWAY_REFUSAL = b'{"error":"text is empty"}\n'
 
 
 class _Runner:
@@ -126,14 +128,14 @@ class ResolveTest(unittest.TestCase):
     def test_the_probe_decides_whether_a_routed_subscription_is_offered(self):
         self.probe.stop()
         runner = _Runner()
-        refused = subprocess.CompletedProcess([], 1, b"", b"")
+        refused = subprocess.CompletedProcess([], 1, GATEWAY_REFUSAL, b"")
         with mock.patch.dict(os.environ, ROUTED):
             with mock.patch.object(kanban_chat_notify.subprocess, "run", return_value=refused):
                 stand_in = kanban_chat_notify.resolve(runner, Platform.GOOGLE_CHAT, None)  # an armed gateway's refusal: up
             for returncode, offered in ((kanban_chat_notify.NOTIFY_ROUTE_UNAVAILABLE, False), (1, True)):
                 stand_in._route_down_until = 0.0
                 stand_in._probed_at = float("-inf")
-                done = subprocess.CompletedProcess([], returncode, b"", b"")
+                done = subprocess.CompletedProcess([], returncode, GATEWAY_REFUSAL if returncode == 1 else b"", b"")
                 with mock.patch.object(kanban_chat_notify.subprocess, "run", return_value=done) as run:
                     got = kanban_chat_notify.resolve(runner, Platform.GOOGLE_CHAT, None)
                 self.assertEqual(got is stand_in, offered, returncode)
@@ -144,7 +146,7 @@ class ResolveTest(unittest.TestCase):
         runner = _Runner()
         with mock.patch.dict(os.environ, ROUTED), \
                 mock.patch.object(kanban_chat_notify.subprocess, "run",
-                                  return_value=subprocess.CompletedProcess([], 1, b"", b"")) as run:
+                                  return_value=subprocess.CompletedProcess([], 1, GATEWAY_REFUSAL, b"")) as run:
             stand_in = kanban_chat_notify.resolve(runner, Platform.GOOGLE_CHAT, None)
             kanban_chat_notify.resolve(runner, Platform.GOOGLE_CHAT, None)
             self.assertEqual(run.call_count, 1, "a second resolve inside the TTL must not probe again")
@@ -160,7 +162,7 @@ class ResolveTest(unittest.TestCase):
         self.probe.stop()
         runner = _Runner()
         clock = [1000.0]
-        up = subprocess.CompletedProcess([], 1, b"", b"")
+        up = subprocess.CompletedProcess([], 1, GATEWAY_REFUSAL, b"")
         down = subprocess.CompletedProcess([], kanban_chat_notify.NOTIFY_ROUTE_UNAVAILABLE, b"", b"")
         with mock.patch.dict(os.environ, ROUTED), \
                 mock.patch.object(kanban_chat_notify.time, "monotonic", lambda: clock[0]), \
@@ -182,8 +184,18 @@ class ResolveTest(unittest.TestCase):
             self.assertIs(kanban_chat_notify.resolve(runner, Platform.GOOGLE_CHAT, None), stand_in)
             self.assertEqual(run.call_count, 3)
 
+    def test_a_probe_failure_the_gateway_did_not_answer_holds_deliveries(self):
+        # During an auth-callout outage the CLI's login is refused (exit 1)
+        # before any gateway sees the probe: that is not the route answering.
+        self.probe.stop()
+        runner = _Runner()
+        unanswered = subprocess.CompletedProcess([], 1, b"", b"a2a: notify: nats: Authorization Violation")
+        with mock.patch.dict(os.environ, ROUTED), \
+                mock.patch.object(kanban_chat_notify.subprocess, "run", return_value=unanswered):
+            self.assertIsNone(kanban_chat_notify.resolve(runner, Platform.GOOGLE_CHAT, None))
+
     def test_active_platforms(self):
-        with mock.patch.dict(os.environ, ROUTED):
+        with mock.patch.dict(os.environ, ROUTED), mock.patch.object(kanban_chat_notify, "routed_since") as since:
             self.assertEqual(kanban_chat_notify.active_platforms({"api_server"}), {"api_server", "google_chat"})
         with mock.patch.dict(os.environ, UNROUTED):
             self.assertEqual(kanban_chat_notify.active_platforms({"api_server"}), {"api_server"})
@@ -231,6 +243,21 @@ class SendTest(unittest.TestCase):
     def test_outcome_unknown_is_not_a_failure(self):
         result, _ = self._send(kanban_chat_notify.NOTIFY_OUTCOME_UNKNOWN)
         self.assertTrue(result.success)
+
+    def test_a_failure_the_gateway_did_not_answer_marks_the_route_down(self):
+        adapter = kanban_chat_notify.ChatNotifyAdapter(Platform.GOOGLE_CHAT, _Runner())
+
+        async def fake_exec(*argv, **kwargs):
+            return _Proc(1, err=b"a2a: notify: nats: Authorization Violation")
+
+        with mock.patch.object(kanban_chat_notify.asyncio, "create_subprocess_exec", fake_exec):
+            result = asyncio.run(adapter.send("spaces/H", "x"))
+        self.assertFalse(result.success)
+        self.assertTrue(adapter.route_down())
+
+    def test_a_gateway_refusal_does_not_mark_the_route_down(self):
+        result, _ = self._send(1, out=GATEWAY_REFUSAL)
+        self.assertFalse(result.success)
 
     def test_route_unavailable_fails_and_marks_the_route_down(self):
         adapter = kanban_chat_notify.ChatNotifyAdapter(Platform.GOOGLE_CHAT, _Runner())
@@ -310,6 +337,31 @@ class FreshEventsTest(unittest.TestCase):
             self.assertEqual([ev.id for ev in kept["events"]], [2])
         recorded = Path(self.home, kanban_chat_notify.ROUTED_SINCE_FILE).read_text().strip()
         self.assertEqual(float(recorded), live)
+
+    def test_the_first_routed_tick_records_the_moment_before_any_claim(self):
+        # The route can be down for hours after the rollout, with nothing
+        # claimed; the record is the first routed tick, not the first claim.
+        live = 1_000_000.0
+        with mock.patch.dict(os.environ, ROUTED), \
+                mock.patch.object(kanban_chat_notify.time, "time", return_value=live):
+            kanban_chat_notify.active_platforms({"api_server"})
+        held = _Event(1, int(live + 3600))
+        claim = {"sub": {"platform": "google_chat", "task_id": "t"}, "events": [held], "cursor": 1}
+        with mock.patch.dict(os.environ, ROUTED):
+            kept = kanban_chat_notify.fresh_events(claim, now=live + 9 * 3600)
+        self.assertEqual([ev.id for ev in kept["events"]], [1])
+
+    def test_an_unreadable_record_skips_nothing_and_is_not_overwritten(self):
+        record = Path(self.home, kanban_chat_notify.ROUTED_SINCE_FILE)
+        old = _Event(1, 1)
+        claim = {"sub": {"platform": "google_chat", "task_id": "t"}, "events": [old], "cursor": 1}
+        for torn in ("", "nan", "inf", "garbage"):
+            record.write_text(torn)
+            kanban_chat_notify._routed_since = None
+            with mock.patch.dict(os.environ, ROUTED):
+                kept = kanban_chat_notify.fresh_events(claim, now=1_000_000.0)
+            self.assertEqual([ev.id for ev in kept["events"]], [1], repr(torn))
+            self.assertEqual(record.read_text(), torn, "an unreadable record must not be replaced with now")
 
     def test_stale_events_are_dropped_for_the_routed_platform_only(self):
         now = 1_000_000.0
