@@ -102,13 +102,18 @@ func NewGchatNotifier(poster notifyPoster, home string, log *slog.Logger) (*Noti
 // The subscription survives connection rebuilds (lib.Client.SubscribeCore);
 // stopping it also stops the worker once the queue drains.
 func (n *Notifier) Start(client *lib.Client) (lib.Subscription, error) {
-	n.jobs = make(chan notifyJob, notifyQueueDepth)
-	n.done = make(chan struct{})
+	// The queue and its worker are made once and outlive a failed bind: the
+	// handler is subscribed before the bind's flush, so a request can be
+	// queued by an attempt that then fails, and it must still be served.
+	if n.jobs == nil {
+		n.jobs = make(chan notifyJob, notifyQueueDepth)
+		n.done = make(chan struct{})
+		go n.work()
+	}
 	sub, err := client.SubscribeCore(n.subject, n.handle)
 	if err != nil {
 		return nil, fmt.Errorf("notify: %w", err)
 	}
-	go n.work()
 	n.log.Info("chat.notify route armed", "subject", n.subject, "home", n.home)
 	return &notifierSub{sub: sub, n: n}, nil
 }
