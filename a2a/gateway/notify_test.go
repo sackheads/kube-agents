@@ -522,3 +522,44 @@ func TestNotifyRequestCarriesTheWait(t *testing.T) {
 		t.Fatalf("deadline is %s after receipt, want the request's 60s", d)
 	}
 }
+
+// A request queued by a bind attempt that then failed is still served: the
+// queue and its worker outlive the attempt, so the next Start does not orphan
+// it behind a fresh channel with nothing reading it.
+func TestARequestQueuedDuringAFailedBindIsStillServed(t *testing.T) {
+	s := startServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	dead, err := lib.Connect(ctx, s.ClientURL(), lib.WithName("notify-dead"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead.Close()
+	p := &fakeNotifyPoster{landsIn: testHome + "/threads/T1"}
+	n := newTestNotifier(t, p)
+	if _, err := n.Start(dead); err == nil {
+		t.Fatal("Start on a closed client succeeded; the test needs a failed bind")
+	}
+	answered := make(chan lib.NotifyReply, 1)
+	n.jobs <- notifyJob{req: lib.NotifyRequest{Text: "queued during the failed bind"},
+		answer: func(r lib.NotifyReply) { answered <- r }}
+
+	client, err := lib.Connect(ctx, s.ClientURL(), lib.WithName("notify-live"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	sub, err := n.Start(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Stop()
+	select {
+	case r := <-answered:
+		if r.MessageID == "" {
+			t.Fatalf("answer = %+v, want a post", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request queued during the failed bind was never served")
+	}
+}

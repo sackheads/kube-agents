@@ -909,10 +909,15 @@ class A3TheTaskPlaneSubjectSaysWhoWroteIt(unittest.TestCase):
         # Matched on the subject and on the Go names a grant would be spelled
         # with (lib.NotifySubjectGchat, lib.NotifyReplyPrefix): sessionGrants
         # builds its list from lib constants, never from subject literals.
+        # Read over the whole function, comments stripped, not just its head
+        # literal: the grants grow by append below it, and a notify subject
+        # there in either list is a session reaching the route.
+        body = h.go_function_body(h.text("a2a_session_grants"), "sessionGrants")
+        code = re.sub(r"//[^\n]*", "", body)
         self.assertNotRegex(
-            self._session_publish_derivation(),
+            code,
             r"chat\.notify|Notify(Subject|Reply)",
-            "the callout derives a session a publish grant on the notify route",
+            "the callout derives a session a grant on the notify route",
         )
 
     def test_A3_the_supervisor_holds_no_publish_on_the_executors_events_subject(self) -> None:
