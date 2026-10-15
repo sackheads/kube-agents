@@ -2707,7 +2707,7 @@ func handOff(t *testing.T, exec *lib.TaskExecution) {
 // doesn't read "on it" as an empty answer.
 func TestAChildThatHandedOffToACardWakesSayingTheCardIsRunning(t *testing.T) {
 	r, spawn := startRigWithSpawner(t)
-	conv := "discord:g1/t-handoff"
+	conv := "slack:C1/t-handoff"
 	_, _, child := delegated(t, r, spawn, conv, "")
 	cexec := r.execFor(t, child, targetPlatform)
 	handOff(t, cexec)
@@ -2730,7 +2730,7 @@ func TestAChildThatHandedOffToACardWakesSayingTheCardIsRunning(t *testing.T) {
 // terminal found by a heal after a restart reads the handoff off the fold.
 func TestAHealedChildThatHandedOffWakesSayingTheCardIsRunning(t *testing.T) {
 	r, spawn := startRigWithSpawner(t)
-	conv := "discord:g1/t-heal-handoff"
+	conv := "slack:C1/t-heal-handoff"
 	_, _, child := delegated(t, r, spawn, conv, "")
 	waitFor(t, "parent terminal relayed", postedContaining(r, "delegated to platform"))
 	cexec := r.execFor(t, child, targetPlatform)

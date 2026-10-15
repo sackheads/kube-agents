@@ -428,6 +428,11 @@ func (g *Gateway) relayTerminal(ctx context.Context, rec *SessionRecord, rs *rel
 			if task.Artifact(lib.ArtifactDelegate) != nil {
 				evidence = delegateSeen
 			}
+			// A handoff acked and lost to a restart before the terminal
+			// was processed is still on the stream (#3258).
+			if handedOff(task) {
+				rs.handoff = true
+			}
 			if needDelegate {
 				g.runFoldedDelegate(ctx, rec, rs, taskID, addressee, task)
 			}

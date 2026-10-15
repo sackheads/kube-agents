@@ -456,7 +456,7 @@ func wakeText(state lib.TaskState, childID, ask string, turns []string, result, 
 // agent's acknowledgement, and the card's report arrives in the conversation
 // later on its own (#2734's conversation notify). Without it the session
 // read "on it" as an empty answer and told the user to start over (#3258).
-const wakeHandoffNote = "The " + targetPlatform + " agent handed this work to a Cluster Agent card that is still running, so what came back above is its hand-off, not the answer. The card's report will post into this conversation by itself when it finishes. Tell the user plainly that the work is underway and the report will appear here. Don't say nothing came back, and don't ask them to start over."
+const wakeHandoffNote = "The " + targetPlatform + " agent handed this work to a Cluster Agent card that is still running, so what came back above is its hand-off, not the answer. The card is set to post its report into this conversation by itself when it finishes. Tell the user plainly that the work is underway and the report will appear here. Don't say nothing came back, and don't ask them to start over."
 
 // wakeReplyGuide and wakeReplyGuideFull close every wake's text, chosen by
 // whether the person asking has seen the child's result (wakeNeedsFullAnswer).

@@ -1721,7 +1721,8 @@ func cardsMark(run *taskRun, state lib.TaskState) (lib.Part, bool) {
 }
 
 // publishHandoff publishes lib.ArtifactHandoff ahead of the terminal of a
-// completed turn that filed kanban cards whose reports can reach the
+// completed task whose last turn (the one whose answer is the result) filed
+// kanban cards whose reports can reach the
 // conversation (the route was recorded). Unlike cardsMark it doesn't depend
 // on the platform or on the turn's final text: a turn that answers "on it"
 // and files a card still handed its work off, and a delegating session must
@@ -1729,7 +1730,7 @@ func cardsMark(run *taskRun, state lib.TaskState) (lib.Part, bool) {
 // like every artifact but the result.
 func (b *Bridge) publishHandoff(run *taskRun, state lib.TaskState) {
 	a := run.act.Load()
-	if state != lib.StateCompleted || a == nil || !a.cardsFiled.Load() || !run.routeRecorded.Load() {
+	if state != lib.StateCompleted || a == nil || !a.turnCards.Load() || !run.routeRecorded.Load() {
 		return
 	}
 	b.publishArtifactPart(run, lib.ArtifactHandoff, lib.Part{Kind: "text", Text: lib.HandoffCards})
