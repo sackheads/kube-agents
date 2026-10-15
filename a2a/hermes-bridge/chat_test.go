@@ -359,6 +359,60 @@ func TestAPI_ATurnThatFiledCardsKeepsItsAsk(t *testing.T) {
 	}
 }
 
+// A turn that filed kanban cards with its route recorded publishes the
+// handoff artifact ahead of its terminal, whatever its final text and
+// whether or not the Slack UX is on, so a delegating session hears that the
+// work went to a card rather than reading "on it" as the answer (#3258).
+// No card filed, a failed kanban_create or an unrecorded route: none.
+func TestAPI_ATurnThatFiledCardsPublishesTheHandoff(t *testing.T) {
+	t.Setenv(slackUXEnv, "")
+	const shared = "pod-wide-activity-key"
+	for _, tc := range []struct {
+		name, prompt string
+		storeStatus  int
+		want         bool
+	}{
+		{"filed", "diagnose the pod restarts in crash-ns; fan out", http.StatusOK, true},
+		{"failed-call", "diagnose the pod restarts in crash-ns; broken", http.StatusOK, false},
+		{"direct", "is checkout-gateway restarting in seeded-a?", http.StatusOK, false},
+		{"route-refused", "diagnose the pod restarts in crash-ns; fan out", http.StatusBadRequest, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, url := startServer(t)
+			store := newRouteStore(t, tc.storeStatus)
+			var door atomic.Value
+			stub := newAPIStub(t, func(w http.ResponseWriter, r *http.Request, c apiCall) {
+				u := door.Load().(string)
+				switch {
+				case strings.Contains(tc.prompt, "fan out"):
+					postDelivery(t, u, shared, c.sessionID, hookPreToolCall, kanbanCreateTool, "call_1")
+					postDelivery(t, u, shared, c.sessionID, hookPostToolCall, kanbanCreateTool, "call_1")
+				case strings.Contains(tc.prompt, "broken"):
+					postDeliveryStatus(t, u, shared, c.sessionID, kanbanCreateTool, "call_1", ActivityStatusError)
+				}
+				writeCompletion(w, c.sessionID, "focusing on memory limits")
+			})
+			b := startAPIBridge(t, url, stub, func(cfg *Config) {
+				cfg.ActivityListen = "127.0.0.1:0"
+				cfg.ActivitySecret = shared
+				cfg.RouteURL, cfg.RouteKey = store.srv.URL, "kv-key"
+			})
+			door.Store(b.ActivityURL())
+			c := gatewayClient(t, url)
+			submitFrom(t, c, "task-"+tc.name, "ctx-"+tc.name, "slack:C1/1.2", tc.prompt)
+			task := waitTerminal(t, c, "task-"+tc.name)
+			if task.State != lib.StateCompleted {
+				t.Fatalf("state = %s, want completed", task.State)
+			}
+			art := task.Artifact(lib.ArtifactHandoff)
+			got := art != nil && len(art.Parts) == 1 && art.Parts[0].Text == lib.HandoffCards
+			if got != tc.want {
+				t.Fatalf("handoff artifact = %+v, want present=%v", art, tc.want)
+			}
+		})
+	}
+}
+
 // postDeliveryStatus is postDelivery's closing delivery for a call that ended
 // with status, as hermes reports a failed tool call.
 func postDeliveryStatus(t *testing.T, url, key, sessionID, tool, callID, status string) {

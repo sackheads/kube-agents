@@ -1221,7 +1221,7 @@ func (g *Gateway) healActiveTask(ctx context.Context, rec *SessionRecord) {
 		case child && healedTask != nil:
 			turns, result, reason := healedChildOutcome(healedTask)
 			// false: the heal's status card above carries no result text.
-			if woken, why := g.wakeSession(ctx, rec, ref, healedTask.State, turns, result, reason, false); !woken {
+			if woken, why := g.wakeSession(ctx, rec, ref, healedTask.State, turns, result, reason, false, handedOff(healedTask)); !woken {
 				g.observeChildEnd(rec, ref, healedTask.State, healedSource, reason, why)
 			}
 		case child:
@@ -1324,6 +1324,13 @@ func (g *Gateway) runFoldedDelegate(ctx context.Context, rec *SessionRecord, rs 
 // relayTerminal hands them to wakeSession: the turn answers in turn order,
 // the result artifact's text (the stand-in line for a completed task with
 // none) and the terminal message.
+// handedOff reports whether task published lib.ArtifactHandoff (relayState.handoff,
+// for a terminal a heal found on the stream).
+func handedOff(task *lib.Task) bool {
+	art := task.Artifact(lib.ArtifactHandoff)
+	return art != nil && lastTextPart(art.Parts) == lib.HandoffCards
+}
+
 func healedChildOutcome(task *lib.Task) (turns []string, result, reason string) {
 	if art := task.Artifact(lib.ArtifactResult); art != nil {
 		result = joinTextParts(art.Parts)

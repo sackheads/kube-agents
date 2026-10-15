@@ -416,7 +416,7 @@ func capAsk(text string) string {
 // and then ended otherwise wakes with those answers, then its reason under
 // wakeEndMarker. With none the body is the result or the reason alone, as
 // before.
-func wakeText(state lib.TaskState, childID, ask string, turns []string, result, reason string, fullAnswer bool) string {
+func wakeText(state lib.TaskState, childID, ask string, turns []string, result, reason string, fullAnswer, handoff bool) string {
 	outcome, completed, body := "completed", true, result
 	switch state {
 	case lib.StateFailed, lib.StateCanceled: // a canceled the gateway did not publish
@@ -442,11 +442,21 @@ func wakeText(state lib.TaskState, childID, ask string, turns []string, result, 
 	} else if body = strings.TrimSpace(body); body != "" {
 		text += "\n" + fenceWakeBody("", body)
 	}
+	if handoff && state == lib.StateCompleted {
+		text += "\n" + wakeHandoffNote
+	}
 	if fullAnswer {
 		return text + "\n" + wakeReplyGuideFull
 	}
 	return text + "\n" + wakeReplyGuide
 }
+
+// wakeHandoffNote follows the result in the wake of a child that handed its
+// work to kanban cards (lib.ArtifactHandoff): its result is the platform
+// agent's acknowledgement, and the card's report arrives in the conversation
+// later on its own (#2734's conversation notify). Without it the session
+// read "on it" as an empty answer and told the user to start over (#3258).
+const wakeHandoffNote = "The " + targetPlatform + " agent handed this work to a Cluster Agent card that is still running, so what came back above is its hand-off, not the answer. The card's report will post into this conversation by itself when it finishes. Tell the user plainly that the work is underway and the report will appear here. Don't say nothing came back, and don't ask them to start over."
 
 // wakeReplyGuide and wakeReplyGuideFull close every wake's text, chosen by
 // whether the person asking has seen the child's result (wakeNeedsFullAnswer).
@@ -536,8 +546,9 @@ func fenceWakeBody(earlier, last string) string {
 	fence := wakeFence(body)
 	// label \n fence \n body \n fence, then \n and the closing guide
 	// (wakeReplyGuide or wakeReplyGuideFull), which wakeText appends after
-	// this block.
-	budget := lib.DelegateTextCap - len(wakeResultLabel) - 2*len(fence) - 3 - 1 - wakeReplyGuideMax
+	// this block, and room for \n and wakeHandoffNote before it whether or
+	// not this wake carries it.
+	budget := lib.DelegateTextCap - len(wakeResultLabel) - 2*len(fence) - 3 - 1 - wakeReplyGuideMax - 1 - len(wakeHandoffNote)
 	if len(body) > budget {
 		if keep := budget - len(last) - len("…") - len(wakeTruncatedNote); earlier != "" && keep >= 0 {
 			body = truncateRunes(earlier, keep) + wakeTruncatedNote + last
@@ -696,7 +707,7 @@ func (g *Gateway) flushNotices(conversation string, rs *relayState) {
 // It reports whether the wake reached the bus, and when it did not, why, in
 // a phrase for the chain root's terminal reason (observeChildEnd). A stop
 // the requester asked for reports false and no reason.
-func (g *Gateway) wakeSession(ctx context.Context, rec *SessionRecord, child TaskRef, state lib.TaskState, turns []string, result, reason string, resultPosted bool) (bool, string) {
+func (g *Gateway) wakeSession(ctx context.Context, rec *SessionRecord, child TaskRef, state lib.TaskState, turns []string, result, reason string, resultPosted, handoff bool) (bool, string) {
 	log := g.log.With("child", child.ID, "conversation", rec.Key, "state", string(state))
 	// The gateway published a cancel for the child: the human said stop,
 	// and whatever the executor answered with, waking the session would act
@@ -730,7 +741,7 @@ func (g *Gateway) wakeSession(ctx context.Context, rec *SessionRecord, child Tas
 
 	// The delegating turn's request, carried down a longer chain: the
 	// human's question, not an intermediate wake's gateway-authored text.
-	text := wakeText(state, child.ID, parent.Request, turns, result, reason, wakeNeedsFullAnswer(&parent, resultPosted))
+	text := wakeText(state, child.ID, parent.Request, turns, result, reason, wakeNeedsFullAnswer(&parent, resultPosted), handoff)
 
 	if rec.Profile == "" {
 		rec.Profile = sessionProfile

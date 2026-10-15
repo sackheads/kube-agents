@@ -63,7 +63,20 @@ const (
 	// with a chat message. Each one posts once and is never edited
 	// (spec-a2a-payloads.md, "Reserved artifact names").
 	ArtifactNotice = "notice"
+	// ArtifactHandoff says a completed task handed its work to kanban
+	// cards that are still running and will report into the task's
+	// conversation themselves: one text part, HandoffCards. The hermes-bridge
+	// publishes it ahead of the terminal of a turn that filed cards with its
+	// conversation route recorded; the gateway never renders it, and a
+	// delegated child's wake reads it so the session doesn't take the
+	// turn's acknowledgement for the answer (#3258; spec-a2a-payloads.md,
+	// "Reserved artifact names").
+	ArtifactHandoff = "handoff"
 )
+
+// HandoffCards is the ArtifactHandoff text part: the work went to kanban
+// cards.
+const HandoffCards = "cards"
 
 // DelegateRequest is the ArtifactDelegate data part's shape: one child task
 // to mint, addressee and the task text. It is also the wire shape the

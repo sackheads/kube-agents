@@ -79,6 +79,10 @@ type relayState struct {
 	// with it unset reads the fold for a request this process never saw
 	// (relayTerminal).
 	sawDelegate bool
+	// handoff is set once the task published lib.ArtifactHandoff: it
+	// handed its work to kanban cards that report into the conversation
+	// themselves, so its result is a hand-off, not an answer (#3258).
+	handoff bool
 	// local is set when this gateway started the task (startTaskWith), so
 	// every event of it reached this process's relay: an event acked and
 	// lost before its batch takes a crash, and a restart starts the task's
@@ -353,6 +357,10 @@ func (g *Gateway) applyArtifact(ctx context.Context, rec *SessionRecord, rs *rel
 		notice := g.readChat(rec.Key, taskID, chatmsg.Notice, a.Artifact.Parts)
 		g.postMessage(rec.Key, OutMessage{Text: notice.Fallback, Chat: layoutOf(notice)})
 		g.markFrom(rec, taskID, notice)
+	case lib.ArtifactHandoff:
+		// The task handed its work to kanban cards; read by a delegated
+		// child's wake (wakeSession), never rendered to chat.
+		rs.handoff = rs.handoff || lastTextPart(a.Artifact.Parts) == lib.HandoffCards
 	case lib.ArtifactDelegate:
 		// A request to the gateway, never rendered to chat.
 		rs.sawDelegate = true
@@ -615,7 +623,7 @@ func (g *Gateway) relayTerminal(ctx context.Context, rec *SessionRecord, rs *rel
 		if turnsUnread {
 			wakeResult, wakeReason = withTurnsUnread(result), withTurnsUnread(reason)
 		}
-		if woken, why := g.wakeSession(ctx, rec, ref, s.Status.State, turns, wakeResult, wakeReason, true); !woken {
+		if woken, why := g.wakeSession(ctx, rec, ref, s.Status.State, turns, wakeResult, wakeReason, true, rs.handoff); !woken {
 			g.observeChildEnd(rec, ref, s.Status.State, source, reason, why)
 		}
 	}
