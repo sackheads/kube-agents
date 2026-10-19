@@ -2386,6 +2386,20 @@ class Loader(unittest.TestCase):
     def envelope_of(completed: subprocess.CompletedProcess) -> dict:
         return json.loads(completed.stdout.rsplit(watch.ENVELOPE_SENTINEL, 1)[1])
 
+    def test_the_report_argv_never_carries_the_cluster_exclusion(self) -> None:
+        # #3081: the watch's report still covers the clusters
+        # spec.scope.exclude.clusters excludes (#3026), as the CRD field documents,
+        # even on a declared scope that excludes some: the agent-facing
+        # collector_args carries the flag, the watch's argv must not.
+        excluding = fleet_scope_targets.ScopeTargets(
+            projects=("ops-mgmt", "payments-prod"), unread=(), resolved_at=None, path="fleet_scope.json",
+            excluded_clusters=(("payments-prod", "us-central1", "pay-blue"),),
+        )
+        self.assertIn("--scope-exclude-clusters", excluding.collector_args())
+        for scope in (None, excluding):
+            for readiness in (False, True):
+                self.assertNotIn("--scope-exclude-clusters", watch.report_argv(["ops-mgmt", "payments-prod"], readiness, scope))
+
     def test_the_shipped_set_is_every_skill_module_but_the_tests(self) -> None:
         shipped = watch.shipped_modules()
         for name in (watch.REPORT_MODULE, watch.READINESS_MODULE, "readiness_rules", "readiness_rules.audit_log", "readiness_rules.zonal_control_plane", "readiness_rules.finding", "upgrade_shape_tables"):
