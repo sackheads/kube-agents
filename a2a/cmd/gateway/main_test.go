@@ -634,10 +634,12 @@ func TestRealMainWiresMetrics(t *testing.T) {
 
 type stubConversations struct{}
 
-func (stubConversations) ConversationContext(context.Context, string) (string, error) { return "", nil }
-func (stubConversations) Post(string, string) (string, error)                         { return "", nil }
-func (stubConversations) PostMessage(string, gateway.OutMessage) (string, error)      { return "", nil }
-func (stubConversations) EditMessage(string, string, gateway.OutMessage) error        { return nil }
+func (stubConversations) ConversationContext(context.Context, string) (string, bool, error) {
+	return "", false, nil
+}
+func (stubConversations) Post(string, string) (string, error)                    { return "", nil }
+func (stubConversations) PostMessage(string, gateway.OutMessage) (string, error) { return "", nil }
+func (stubConversations) EditMessage(string, string, gateway.OutMessage) error   { return nil }
 
 // A chat backend with no home channel drops every proactive post while
 // conversations keep working, so the startup line saying so is a warning

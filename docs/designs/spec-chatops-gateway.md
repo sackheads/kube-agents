@@ -1576,12 +1576,14 @@ only, accepted for `a2a-*` sessions alone). `kanban_event_routing` swaps that ro
 (`parent_session_id`, parent ended `compression`) when the session has since been renamed. The
 kanban notifier then sends the card's report with `--conversation` and `--context`. The gateway
 posts it, through its own adapter and into the conversation's thread, only when it holds a
-session record for that key carrying that context id: a conversation the agent is working in.
-The bound is the set of live records rather than a secret: the agent principal, the one sender,
+session record for that key carrying that context id, and only when a task there handed work to
+cards (the record's `cardsAnswer` mark), since a conversation post is a card's report. The bound
+is the set of live records with cards rather than a secret: the agent principal, the one sender,
 can read every live conversation's context id (its Hermes sessions are named for them), so the
-check refuses a conversation with no record, a made-up key and a stale route, not a post into
-another conversation the agent holds a session for. No record, another
-context, or a record that cannot be read gets one refusal whatever the reason; a malformed request (a key on another backend, a thread and a conversation
+check refuses a conversation with no record or no cards, a made-up key and a stale route, not a
+post into another conversation that also handed work to cards. Closing that needs a value the
+agent can't read, which only a sender outside the agent container could hold. No record, another
+context, no cards, or a record that cannot be read gets one refusal whatever the reason; a malformed request (a key on another backend, a thread and a conversation
 together, a conversation with no context id) is refused by name. Nothing is posted in either
 case. The subjects and grants are the same as for a home post; a route the
 bridge cannot record is said at the end of the turn's answer, since the card's report will not
@@ -1712,8 +1714,9 @@ and goes when kanban does.
 A notify is not a task. It mints no capability, starts no executor, opens no session and
 carries no `authority` block; the requester rules above do not apply, because nobody
 requested it. What bounds it is where it may land and who may send it. Where: the home space,
-or a conversation the gateway holds a session record for carrying the request's context id; a
-thread of another space, or a conversation without that record and context, is refused before
+or a conversation the gateway holds a session record for carrying the request's context id and a
+hand-off to cards; a thread of another space, or a conversation without that record, context and
+hand-off, is refused before
 any post (on Slack, a home post lands in the home channel only, which the gateway sets on every
 post). Who: the agent principal alone publishes `chat.notify.gchat`, `chat.notify.slack` and
 `chat.notify.console`, and reads `chat.notify.reply.agent.>`; the gateway alone reads the first

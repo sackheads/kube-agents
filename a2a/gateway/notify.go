@@ -117,10 +117,11 @@ var (
 
 // NotifyConversations is the gateway's side of a request aimed at a
 // conversation rather than the home channel: the context id of the
-// conversation's session record ("" when it has none), and a post into it,
-// or an edit of a post the route made there, with the gateway's own adapter.
+// conversation's session record ("" when it has none) and whether a task
+// there handed work to kanban cards, and a post into it, or an edit of a
+// post the route made there, with the gateway's own adapter.
 type NotifyConversations interface {
-	ConversationContext(ctx context.Context, key string) (string, error)
+	ConversationContext(ctx context.Context, key string) (contextID string, cardsHandedOff bool, err error)
 	Post(conversation, text string) (messageID string, err error)
 	PostMessage(conversation string, m OutMessage) (messageID string, err error)
 	EditMessage(conversation, messageID string, m OutMessage) error
@@ -675,7 +676,7 @@ func (n *Notifier) post(job notifyJob) {
 	if job.req.Conversation != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), notifyLookupTimeout)
 		defer cancel()
-		have, err := n.conv.ConversationContext(ctx, job.req.Conversation)
+		have, cards, err := n.conv.ConversationContext(ctx, job.req.Conversation)
 		if err != nil {
 			n.log.Warn("notify: session record unreadable", "conversation", job.req.Conversation, "err", err)
 			n.reply(job, n.refuse(notifyConversationRefused))
@@ -683,6 +684,16 @@ func (n *Notifier) post(job notifyJob) {
 		}
 		if have == "" || have != job.req.ContextID {
 			n.log.Warn("notify refused: no live conversation with that context", "conversation", job.req.Conversation)
+			n.reply(job, n.refuse(notifyConversationRefused))
+			return
+		}
+		// A conversation post is a card's report, so only a conversation
+		// that handed work to cards takes one. The context id alone is no
+		// bound: the agent sees the context ids of every conversation it
+		// works in, so a prompt-injected turn could otherwise name another
+		// live one. The refusal reads the same either way.
+		if !cards {
+			n.log.Warn("notify refused: the conversation handed no work to cards", "conversation", job.req.Conversation)
 			n.reply(job, n.refuse(notifyConversationRefused))
 			return
 		}
@@ -1341,12 +1352,12 @@ type gatewayConversations struct {
 	poster Adapter
 }
 
-func (c gatewayConversations) ConversationContext(ctx context.Context, key string) (string, error) {
+func (c gatewayConversations) ConversationContext(ctx context.Context, key string) (string, bool, error) {
 	rec, err := c.g.reg.Get(ctx, key)
 	if err != nil || rec == nil {
-		return "", err
+		return "", false, err
 	}
-	return rec.ContextID, nil
+	return rec.ContextID, slices.ContainsFunc(rec.Tasks, func(ref TaskRef) bool { return ref.CardsAnswer }), nil
 }
 
 // AnswerFeedbackTarget is the root task of the ask the plan key answerTo is

@@ -532,7 +532,7 @@ The commands below assume the default resource names (`platform-agent`) and the 
 
 5. **The answer comes back to the thread.** Before a task's first turn the bridge records which conversation its Hermes session answers, so the card is addressed to that conversation. As the specialist works, the gateway posts each progress note into the thread or DM you asked in, and then the card's result. Two things differ from delivery under `today`. A card's progress is one plan message the gateway edits in place with `KAGE_SLACK_UX` on, and a message per note with it off. A file the card produced is not attached.
 
-   If the card blocks or fails, the thread gets the card's own blocked or failed line from the notifier. The Planning Agent's wake for it runs in the bridge's session, and its reply is not posted. The gateway posts only into a conversation it is still holding, the one whose session record carries the card's context, and refuses anything else. It logs each post it makes:
+   If the card blocks or fails, the thread gets the card's own blocked or failed line from the notifier. The Planning Agent's wake for it runs in the bridge's session, and its reply is not posted. The gateway posts only into a conversation it is still holding, the one whose session record carries the card's context and shows that a turn there handed work to cards. It refuses anything else. It logs each post it makes:
 
    ```bash
    kubectl logs deployment/platform-agent-a2a-gateway -n kubeagents-system -c gateway | grep -E '"msg":"(chat.notify route armed|notify posted|notify refused)'

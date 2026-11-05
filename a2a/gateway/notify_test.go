@@ -540,8 +540,10 @@ func TestNotifyRequestCarriesTheWait(t *testing.T) {
 type fakeConversations struct {
 	mu       sync.Mutex
 	contexts map[string]string
-	err      error
-	posts    []notifyPost
+	// noCards names conversations whose record shows no hand-off to cards.
+	noCards map[string]bool
+	err     error
+	posts   []notifyPost
 	// rendersChat, edits and chats: see PostMessage. failEdits fails
 	// every EditMessage as a message that is gone; transientEdits fails the
 	// next N as a rate limit would.
@@ -570,8 +572,8 @@ func (f *fakeConversations) MarkConversation(conversation, update string, mark M
 	f.postsAtMark = append(f.postsAtMark, len(f.posts))
 }
 
-func (f *fakeConversations) ConversationContext(_ context.Context, key string) (string, error) {
-	return f.contexts[key], f.err
+func (f *fakeConversations) ConversationContext(_ context.Context, key string) (string, bool, error) {
+	return f.contexts[key], !f.noCards[key], f.err
 }
 
 func (f *fakeConversations) Post(conversation, text string) (string, error) {
@@ -655,6 +657,9 @@ func TestNotifyRefusesAConversationItCannotMatch(t *testing.T) {
 			lib.NotifyRequest{Conversation: testConversation, ContextID: testContext}, notifyConversationRefused},
 		{"no session record", &fakeConversations{contexts: map[string]string{}},
 			lib.NotifyRequest{Conversation: testConversation, ContextID: testContext}, notifyConversationRefused},
+		{"a conversation that handed no work to cards", &fakeConversations{contexts: map[string]string{testConversation: testContext},
+			noCards: map[string]bool{testConversation: true}},
+			lib.NotifyRequest{Conversation: testConversation, ContextID: testContext}, notifyConversationRefused},
 		{"an unreadable record", &fakeConversations{err: errors.New("kv down")},
 			lib.NotifyRequest{Conversation: testConversation, ContextID: testContext}, notifyConversationRefused},
 		{"another backend's conversation", &fakeConversations{contexts: map[string]string{"slack:C1/1.2": testContext}},
@@ -710,11 +715,19 @@ func TestTheGatewaysConversationsReadTheSessionRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	conv := r.g.Conversations(r.adapter)
-	if got, err := conv.ConversationContext(ctx, testConversation); err != nil || got != testContext {
-		t.Fatalf("ConversationContext = %q, %v; want %q", got, err, testContext)
+	if got, cards, err := conv.ConversationContext(ctx, testConversation); err != nil || got != testContext || cards {
+		t.Fatalf("ConversationContext = %q, %v, %v; want %q and no cards", got, cards, err, testContext)
 	}
-	if got, err := conv.ConversationContext(ctx, "gchat:spaces/NONE/threads/X"); err != nil || got != "" {
+	if got, _, err := conv.ConversationContext(ctx, "gchat:spaces/NONE/threads/X"); err != nil || got != "" {
 		t.Fatalf("ConversationContext(unknown) = %q, %v; want empty", got, err)
+	}
+	// A chain that handed work to cards marks its root entry.
+	if err := r.g.reg.Put(ctx, &SessionRecord{Key: testConversation, ContextID: testContext,
+		Tasks: []TaskRef{{ID: "task-root", CardsAnswer: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, cards, err := conv.ConversationContext(ctx, testConversation); err != nil || !cards {
+		t.Fatalf("after a hand-off to cards: cards = %v, %v; want true", cards, err)
 	}
 }
 
@@ -724,7 +737,7 @@ type blockingConversations struct {
 	release chan struct{}
 }
 
-func (b *blockingConversations) ConversationContext(ctx context.Context, key string) (string, error) {
+func (b *blockingConversations) ConversationContext(ctx context.Context, key string) (string, bool, error) {
 	select {
 	case b.entered <- struct{}{}:
 	default:
