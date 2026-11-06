@@ -681,16 +681,16 @@ echo '{"type":"result","subtype":"success","result":"ok"}'
 	defer cancel()
 	cfg := profileWorkerConfig(t, url, harness)
 	ln, addr := readyListener(t)
+	configRoot, resetDir := t.TempDir(), t.TempDir()
 	var slowOnce sync.Once
+	done := make(chan error, 1)
 	go func() {
-		_ = RunProfileWorker(ctx, cfg, ProfileWorkerConfig{
+		done <- RunProfileWorker(ctx, cfg, ProfileWorkerConfig{
 			Tier: pwTier, ReadyAddr: addr, readyListener: ln, deadlineMargin: time.Second,
-			PersonaDir: "../lib/persona/testdata/example", Harness: persona.ClaudeCode, ConfigRoot: t.TempDir(),
+			PersonaDir: "../lib/persona/testdata/example", Harness: persona.ClaudeCode, ConfigRoot: configRoot,
 			// A slow post-task reset after task-one, as on a loaded runner:
-			// the pod stays busy after its final renewal until the reset
-			// ends. Only the first, so task-two's reset is not still running
-			// when the test's temp directories are removed.
-			ResetPaths: []string{t.TempDir()},
+			// the pod stays busy after its final renewal until the reset ends.
+			ResetPaths: []string{resetDir},
 			resetHook: func(phase string) {
 				if phase == "after-task" {
 					slowOnce.Do(func() { time.Sleep(500 * time.Millisecond) })
@@ -698,6 +698,12 @@ echo '{"type":"result","subtype":"success","result":"ok"}'
 			},
 		})
 	}()
+	// Registered after the TempDirs, so it runs before they are removed: the
+	// worker, stopping on cancel, waits out task-two's reset first.
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
 	waitReady(t, addr)
 	for _, task := range []string{"task-one", "task-two"} {
 		offerUntilAccepted(t, d, task, profileSubmission(t, task, "go", nil))
