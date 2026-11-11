@@ -189,13 +189,13 @@ const (
 	sizingStepBackHoldInterval = 10 * time.Minute
 	// sizingCappedByQuotaEventFormat is the Warning event's text: the
 	// condition message, then the figures as they stood when it was written.
-	// It takes the message, the cluster count, the free quantity, the quota
+	// It takes the message, the cluster count as sizingCountPhrase words it, the free quantity, the quota
 	// key and the quantity the step adds.
-	sizingCappedByQuotaEventFormat = "%s (at %d clusters: %s of %s free, the step adds %s)"
+	sizingCappedByQuotaEventFormat = "%s (at %s: %s of %s free, the step adds %s)"
 	// sizingCappedByLimitRangeEventFormat is the LimitRange cap's Warning
-	// event: the message, the cluster count, the bound, its quantity and the
+	// event: the message, the cluster count (sizingCountPhrase), the bound, its quantity and the
 	// container's figure at the refused row.
-	sizingCappedByLimitRangeEventFormat = "%s (at %d clusters: the %s is %s, the row's figure %s)"
+	sizingCappedByLimitRangeEventFormat = "%s (at %s: the %s is %s, the row's figure %s)"
 	// sizingLimitRangeMax, sizingLimitRangeMin and sizingLimitRangeRatio
 	// name the three bounds of a LimitRange item the step-up check reads, as
 	// the LimitRange spec spells them.
@@ -469,6 +469,16 @@ func sizingClusterCount(agent *agentv1alpha1.PlatformAgent) (count int64, declar
 		}
 	}
 	return count, false, ok
+}
+
+// sizingCountPhrase is the count as the cap events print it: the declared
+// figure says where it came from, since it can be far above what is
+// registered.
+func sizingCountPhrase(count int64, declared bool) string {
+	if declared {
+		return fmt.Sprintf("%d clusters declared in spec.storage.expectedClusterProfiles", count)
+	}
+	return fmt.Sprintf("%d clusters", count)
 }
 
 // credentialProxyTierResources is the credential-proxy container's row before
@@ -1724,7 +1734,10 @@ func sizingCappedCondition(agent *agentv1alpha1.PlatformAgent) sizingCap {
 // again when the reading returns. The one no-reading state that is not an
 // outage, the event watcher switched off by spec, clears the condition
 // instead, since the gauges stay absent for as long as it is off and nothing
-// could lift the cap. The write is gated on a change, as the
+// could lift the cap. A declared spec.storage.expectedClusterProfiles
+// (sizingClusterCount) is measured whether or not there is a reading, so a
+// step it earns is taken or capped in either state; one it does not earn
+// leaves the rule above as it stands. The write is gated on a change, as the
 // other status writers' are, because the PlatformAgent watch has no predicate
 // and every write re-enqueues the object; under a served CRD that prunes
 // status.effectiveSizingTier the field reads "" after every write, so the
@@ -1760,7 +1773,17 @@ func (r *PlatformAgentReconciler) resolveSizingTier(ctx context.Context, agent *
 				refused.workload, from, refused.quota, refused.message, tier)}
 		} else if counted, fromDeclared, ok := sizingClusterCount(agent); ok {
 			count, countDeclared = counted, fromDeclared
-			if earned := sizingTierForClusterCount(count); earned > tier {
+			_, observed := observedClusterCount(agent)
+			if earned := sizingTierForClusterCount(count); earned <= tier {
+				// A declared count that earns no step while the gauges are
+				// gone with the watcher on is the outage below, not a count
+				// that fell: the cap stands as written, so the outage
+				// neither clears it nor re-records it on the reading's
+				// return.
+				if !observed && eventWatcherEnabled(agent) {
+					capped = sizingCappedCondition(agent)
+				}
+			} else {
 				quotas, err := r.sizingQuotas(ctx, agent)
 				if err != nil {
 					return err
@@ -1895,9 +1918,16 @@ func (r *PlatformAgentReconciler) resolveSizingTier(ctx context.Context, agent *
 		log.Info("sizing tier resolved", "name", agent.Name, "namespace", agent.Namespace, "from", previous, "to", tier.String(), "profile", profile,
 			"clusters", count, "declared", countDeclared)
 		// The first write, on every CR after the upgrade that brought the
-		// field, is not a change worth an event.
-		if previous != "" {
-			message := fmt.Sprintf(sizingTierChangedMessageFormat, previous, tier, profile)
+		// field, is not a change worth an event, unless the declared count
+		// took it past small: on a fresh install with few clusters
+		// registered, nothing else says why the broker is large. Its "from"
+		// is small, the row an unwritten status renders.
+		if previous != "" || (countDeclared && tier > sizingTierSmall) {
+			from := previous
+			if from == "" {
+				from = sizingTierSmall.String()
+			}
+			message := fmt.Sprintf(sizingTierChangedMessageFormat, from, tier, profile)
 			// A step the declared count earned names it: with few clusters
 			// registered, nothing else on the CR says why the broker grew.
 			// A step back reads no count, so it never names one.
@@ -1916,14 +1946,14 @@ func (r *PlatformAgentReconciler) resolveSizingTier(ctx context.Context, agent *
 		log.Info("sizing tier capped by ResourceQuota", "name", agent.Name, "namespace", agent.Namespace,
 			"quota", short.quota, "key", short.key, "free", short.free.String(), "adds", short.need.String(), "clusters", count)
 		r.recordEvent(agent, corev1.EventTypeWarning, sizingCappedByQuotaEventReason,
-			fmt.Sprintf(sizingCappedByQuotaEventFormat, capped.message, count, short.free.String(), short.key, short.need.String()))
+			fmt.Sprintf(sizingCappedByQuotaEventFormat, capped.message, sizingCountPhrase(count, countDeclared), short.free.String(), short.key, short.need.String()))
 	}
 	if bound != nil && !sizingCappedConditionCurrent(agent, capped) {
 		log.Info("sizing tier capped by LimitRange", "name", agent.Name, "namespace", agent.Namespace,
 			"limitRange", bound.limitRange, "scope", bound.scope, "bound", bound.bound, "key", bound.key, "container", bound.container,
 			"quantity", bound.quantity.String(), "figure", bound.figure, "clusters", count)
 		r.recordEvent(agent, corev1.EventTypeWarning, sizingCappedByLimitRangeEventReason,
-			fmt.Sprintf(sizingCappedByLimitRangeEventFormat, capped.message, count, bound.bound, bound.quantity.String(), bound.figure))
+			fmt.Sprintf(sizingCappedByLimitRangeEventFormat, capped.message, sizingCountPhrase(count, countDeclared), bound.bound, bound.quantity.String(), bound.figure))
 	}
 	agent.Status.EffectiveSizingTier = tier.String()
 	setSizingCappedCondition(agent, capped, metav1.Now())

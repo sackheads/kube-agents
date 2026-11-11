@@ -348,6 +348,87 @@ func TestADeclaredStepNamesTheDeclaredCount(t *testing.T) {
 	}
 }
 
+// TestADeclaredCountKeepsTheOutageRule: with the gauges gone and the watcher
+// on (a gateway outage), a declared count that earns no step above the latch
+// leaves a cap the observed count set where it is, as a pass with no count
+// does, so the outage neither clears it nor re-records it when the reading
+// returns. With the watcher off by spec the cap clears as before; a declared
+// count still earns its step there.
+func TestADeclaredCountKeepsTheOutageRule(t *testing.T) {
+	t.Parallel()
+	capped := func(watcher *bool, declared int32) *agentv1alpha1.PlatformAgent {
+		agent := sizingAgent(sizingProfileAuto, sizingProfileMedium, nil, nil)
+		agent.Spec.Storage = &agentv1alpha1.PlatformAgentStorageSpec{ExpectedClusterProfiles: ptr.To(declared)}
+		if watcher != nil {
+			agent.Spec.Harness.EventWatcher = &agentv1alpha1.EventWatcherSpec{Enabled: watcher}
+		}
+		setSizingCappedCondition(agent, sizingCap{reason: sizingCappedByQuotaReason, message: "capped at medium by quota q"}, metav1.Now())
+		return agent
+	}
+
+	stored, recorder := resolveSizing(t, capped(nil, 12))
+	if cond := meta.FindStatusCondition(stored.Status.Conditions, sizingCappedByQuotaConditionType); cond == nil || cond.Message != "capped at medium by quota q" {
+		t.Fatalf("SizingCappedByQuota = %+v, want the outage to leave the cap", cond)
+	}
+	if stored.Status.EffectiveSizingTier != sizingProfileMedium || len(recorder.Events) != 0 {
+		t.Fatalf("tier %q, %d events; want medium and none", stored.Status.EffectiveSizingTier, len(recorder.Events))
+	}
+
+	stored, _ = resolveSizing(t, capped(ptr.To(false), 12))
+	if cond := meta.FindStatusCondition(stored.Status.Conditions, sizingCappedByQuotaConditionType); cond != nil {
+		t.Fatalf("SizingCappedByQuota = %+v, want it cleared with the watcher off", cond)
+	}
+
+	stored, _ = resolveSizing(t, capped(ptr.To(false), 30))
+	if stored.Status.EffectiveSizingTier != sizingProfileFleet {
+		t.Fatalf("status.effectiveSizingTier = %q, want the declared fleet step with the watcher off", stored.Status.EffectiveSizingTier)
+	}
+}
+
+// TestADeclaredFirstWriteRecordsTheStep: on the first pass of a fresh install
+// a declared count can take the tier straight past small; the event that
+// says so is recorded although the first write otherwise records none.
+func TestADeclaredFirstWriteRecordsTheStep(t *testing.T) {
+	t.Parallel()
+	agent := sizingAgent(sizingProfileAuto, "", nil, nil)
+	agent.Spec.Storage = &agentv1alpha1.PlatformAgentStorageSpec{ExpectedClusterProfiles: ptr.To[int32](30)}
+	_, recorder := resolveSizing(t, agent)
+	if len(recorder.Events) != 1 {
+		t.Fatalf("got %d events, want the declared step", len(recorder.Events))
+	}
+	if event := <-recorder.Events; !strings.Contains(event, "sizing tier small -> fleet") || !strings.Contains(event, "expectedClusterProfiles 30") {
+		t.Errorf("event = %s", event)
+	}
+	// A first write the declared count did not move records nothing, as before.
+	quiet := sizingAgent(sizingProfileAuto, "", nil, nil)
+	quiet.Spec.Storage = &agentv1alpha1.PlatformAgentStorageSpec{ExpectedClusterProfiles: ptr.To[int32](3)}
+	if _, recorder := resolveSizing(t, quiet); len(recorder.Events) != 0 {
+		t.Errorf("a first write at small recorded %d events", len(recorder.Events))
+	}
+}
+
+// TestADeclaredCapEventNamesTheDeclaredCount: the cap's Warning event says
+// the count is the declared one, so "at 30 clusters" on an install with two
+// registered is not read as an observed figure.
+func TestADeclaredCapEventNamesTheDeclaredCount(t *testing.T) {
+	t.Parallel()
+	agent := sizingAgent(sizingProfileAuto, sizingProfileSmall, ptr.To[int64](2), nil)
+	agent.Spec.Storage = &agentv1alpha1.PlatformAgentStorageSpec{ExpectedClusterProfiles: ptr.To[int32](30)}
+	_, recorder := resolveSizing(t, agent, sizingQuota("platform-baseline-quota", "1Gi", "0"))
+	var found bool
+	for len(recorder.Events) > 0 {
+		if event := <-recorder.Events; strings.Contains(event, sizingCappedByQuotaEventReason) {
+			found = true
+			if !strings.Contains(event, "at 30 clusters declared in spec.storage.expectedClusterProfiles") {
+				t.Errorf("cap event = %s", event)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no cap event")
+	}
+}
+
 // TestADeclaredStepPassesTheQuotaGate: a step the declared count earns is
 // measured against the namespace's quotas as an observed one is, and capped
 // the same way.

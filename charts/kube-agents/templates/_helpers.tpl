@@ -2557,7 +2557,10 @@ the request buys CPU; the quota preflight counts them where kube-agents.gkeAutop
        platformAgent.deployment.sizingProfile when it names medium or fleet, and
        small for small, an unset value and auto. auto starts at the operator's
        defaults at install time and is promoted by the operator later, behind its
-       own ResourceQuota check, so the small row is what the install admits. */ -}}
+       own ResourceQuota check, so the small row is what the install admits. That
+       holds with storage.expectedClusterProfiles set too: the operator may take a
+       declared count's step on its first pass, and a quota with no room for it
+       caps the tier there (SizingCappedByQuota) rather than failing the install. */ -}}
 {{- define "kube-agents.sizingTier" -}}
 {{- $profile := ((.Values.platformAgent.deployment | default dict).sizingProfile) | default "" -}}
 {{- if or (eq $profile "medium") (eq $profile "fleet") -}}{{ $profile }}{{- else -}}small{{- end -}}

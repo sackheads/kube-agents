@@ -151,7 +151,8 @@ the tier at the row it admits, and the CR's `SizingCappedByQuota` condition name
 
 Under `auto` the operator counts the larger of the clusters it observes and
 `spec.storage.expectedClusterProfiles`, so a declared count of 25 or more takes the `fleet` row on
-the first reconcile. The node and quota checks above apply from that first step. Broker CPU is what
+the first reconcile. With a `ResourceQuota` or `LimitRange` in the namespace it waits for the first
+pods to settle. The node and quota checks above apply from that first step. Broker CPU is what
 bounds a fleet sweep: each brokered `gcloud` start costs about 1 CPU-second, and five or six
 collectors at once throttle against the 2 CPU limit the `small` and `medium` rows share. Measured at
 that concurrency, raising the broker from 2 to 4 CPU cut collector iteration time by 24 to 31%.
