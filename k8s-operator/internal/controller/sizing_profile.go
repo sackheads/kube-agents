@@ -209,6 +209,10 @@ const (
 	sizingCappedByQuotaEventReason      = "SizingCappedByQuota"
 	sizingCappedByLimitRangeEventReason = "SizingCappedByLimitRange"
 	sizingTierChangedMessageFormat      = "sizing tier %s -> %s (spec.deployment.sizingProfile %s)"
+	// sizingTierChangedDeclaredFormat is appended to the tier-change message
+	// when the declared spec.storage.expectedClusterProfiles, not the
+	// observed count, earned the step (sizingClusterCount).
+	sizingTierChangedDeclaredFormat = ", earned by spec.storage.expectedClusterProfiles %d"
 
 	// The three sized workloads the step-up check reads back: the gateway
 	// workload (a Deployment, or a StatefulSet under useStatefulSet) named
@@ -446,6 +450,25 @@ func observedClusterCount(agent *agentv1alpha1.PlatformAgent) (int64, bool) {
 		count = max(count, *usage.ClustersMonitored)
 	}
 	return count, true
+}
+
+// sizingClusterCount is the count the auto profile earns its tier from: the
+// larger of observedClusterCount and the declared
+// spec.storage.expectedClusterProfiles (#5257), false when there is neither.
+// The declared figure lets an install that states the fleet it is for start
+// at the tier that fleet earns, rather than sweeping on the small broker's
+// CPU while the clusters register and restarting it at each step. It feeds
+// the same thresholds, latch and admission checks as an observed count.
+// declared is true when the declared figure is the one that counts, so the
+// tier-change event can say so.
+func sizingClusterCount(agent *agentv1alpha1.PlatformAgent) (count int64, declared bool, ok bool) {
+	count, ok = observedClusterCount(agent)
+	if storage := agent.Spec.Storage; storage != nil && storage.ExpectedClusterProfiles != nil {
+		if want := int64(*storage.ExpectedClusterProfiles); want > 0 && (!ok || want > count) {
+			return want, true, true
+		}
+	}
+	return count, false, ok
 }
 
 // credentialProxyTierResources is the credential-proxy container's row before
@@ -1717,6 +1740,7 @@ func (r *PlatformAgentReconciler) resolveSizingTier(ctx context.Context, agent *
 	var bound *sizingBound
 	var refused *sizingRefusal
 	var count int64
+	countDeclared := false
 	if profile == sizingProfileAuto {
 		tier = latched
 		if refused = r.sizingRefusedStep(ctx, agent, tier); refused != nil {
@@ -1734,8 +1758,8 @@ func (r *PlatformAgentReconciler) resolveSizingTier(ctx context.Context, agent *
 			tier--
 			capped = sizingCap{reason: sizingCappedByQuotaReason, message: fmt.Sprintf(sizingStepRefusedMessageFormat,
 				refused.workload, from, refused.quota, refused.message, tier)}
-		} else if observed, ok := observedClusterCount(agent); ok {
-			count = observed
+		} else if counted, fromDeclared, ok := sizingClusterCount(agent); ok {
+			count, countDeclared = counted, fromDeclared
 			if earned := sizingTierForClusterCount(count); earned > tier {
 				quotas, err := r.sizingQuotas(ctx, agent)
 				if err != nil {
@@ -1868,11 +1892,19 @@ func (r *PlatformAgentReconciler) resolveSizingTier(ctx context.Context, agent *
 	}
 	log := logf.FromContext(ctx)
 	if previous := agent.Status.EffectiveSizingTier; previous != tier.String() {
-		log.Info("sizing tier resolved", "name", agent.Name, "namespace", agent.Namespace, "from", previous, "to", tier.String(), "profile", profile)
+		log.Info("sizing tier resolved", "name", agent.Name, "namespace", agent.Namespace, "from", previous, "to", tier.String(), "profile", profile,
+			"clusters", count, "declared", countDeclared)
 		// The first write, on every CR after the upgrade that brought the
 		// field, is not a change worth an event.
 		if previous != "" {
-			r.recordEvent(agent, corev1.EventTypeNormal, sizingTierChangedReason, fmt.Sprintf(sizingTierChangedMessageFormat, previous, tier, profile))
+			message := fmt.Sprintf(sizingTierChangedMessageFormat, previous, tier, profile)
+			// A step the declared count earned names it: with few clusters
+			// registered, nothing else on the CR says why the broker grew.
+			// A step back reads no count, so it never names one.
+			if countDeclared {
+				message += fmt.Sprintf(sizingTierChangedDeclaredFormat, count)
+			}
+			r.recordEvent(agent, corev1.EventTypeNormal, sizingTierChangedReason, message)
 		}
 	}
 	if refused != nil {

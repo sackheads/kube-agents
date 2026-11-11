@@ -149,6 +149,13 @@ request (`e2-standard-8` or larger) before the count reaches 25. The `medium` ro
 fits an `e2-standard-4`. A `LimitRange` whose `max`, per container or per pod, is below a row's figure holds
 the tier at the row it admits, and the CR's `SizingCappedByQuota` condition names it.
 
+Under `auto` the operator counts the larger of the clusters it observes and
+`spec.storage.expectedClusterProfiles`, so a declared count of 25 or more takes the `fleet` row on
+the first reconcile. The node and quota checks above apply from that first step. Broker CPU is what
+bounds a fleet sweep: each brokered `gcloud` start costs about 1 CPU-second, and five or six
+collectors at once throttle against the 2 CPU limit the `small` and `medium` rows share. Measured at
+that concurrency, raising the broker from 2 to 4 CPU cut collector iteration time by 24 to 31%.
+
 | Pool             | Shape (modeled)                                                                            | Carries                                                               |
 | ---------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------- |
 | Default          | 3 × `n2-standard-8` (or `c3-standard-8`), 200 GB `pd-balanced` boot disk, autoscale 2 to 4 | proxy, operator, LiteLLM, minter, the `next` stack                    |

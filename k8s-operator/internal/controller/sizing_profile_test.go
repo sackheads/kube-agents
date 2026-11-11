@@ -282,6 +282,89 @@ func TestResolveSizingTierLatchesUpwardOnly(t *testing.T) {
 	}
 }
 
+// TestResolveSizingTierCountsTheDeclaredProfiles pins #5257: under auto, the
+// tier is earned from the larger of the observed count and
+// spec.storage.expectedClusterProfiles, so a declared fleet starts at the
+// tier it will earn. Explicit profiles and an absent one ignore the field.
+func TestResolveSizingTierCountsTheDeclaredProfiles(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name                  string
+		profile, latched      string
+		registered, monitored *int64
+		declared              *int32
+		want                  string
+	}{
+		{"a declared fleet with no reading earns fleet", sizingProfileAuto, "", nil, nil, ptr.To[int32](30), sizingProfileFleet},
+		{"a declared count above the observed one wins", sizingProfileAuto, sizingProfileSmall, ptr.To[int64](5), ptr.To[int64](5), ptr.To[int32](30), sizingProfileFleet},
+		{"an observed count above the declared one wins", sizingProfileAuto, sizingProfileSmall, ptr.To[int64](30), nil, ptr.To[int32](5), sizingProfileFleet},
+		{"a declared ten earns medium", sizingProfileAuto, sizingProfileSmall, nil, nil, ptr.To[int32](10), sizingProfileMedium},
+		{"a small declared count with no reading stays small", sizingProfileAuto, "", nil, nil, ptr.To[int32](5), sizingProfileSmall},
+		{"a lowered declared count never lowers the tier", sizingProfileAuto, sizingProfileFleet, ptr.To[int64](3), nil, ptr.To[int32](3), sizingProfileFleet},
+		{"an explicit small ignores the declared count", sizingProfileSmall, "", nil, nil, ptr.To[int32](500), sizingProfileSmall},
+		{"an explicit medium ignores the declared count", sizingProfileMedium, "", nil, nil, ptr.To[int32](500), sizingProfileMedium},
+		{"an absent profile ignores the declared count", "", "", nil, nil, ptr.To[int32](500), sizingProfileSmall},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			agent := sizingAgent(tc.profile, tc.latched, tc.registered, tc.monitored)
+			agent.Spec.Storage = &agentv1alpha1.PlatformAgentStorageSpec{ExpectedClusterProfiles: tc.declared}
+			stored, _ := resolveSizing(t, agent)
+			if stored.Status.EffectiveSizingTier != tc.want {
+				t.Fatalf("status.effectiveSizingTier = %q, want %q", stored.Status.EffectiveSizingTier, tc.want)
+			}
+		})
+	}
+}
+
+// TestADeclaredStepNamesTheDeclaredCount: the tier-change event says the
+// declared count earned the step, so a reader of `kubectl describe` on an
+// install with few clusters registered can tell why the broker grew.
+func TestADeclaredStepNamesTheDeclaredCount(t *testing.T) {
+	t.Parallel()
+	agent := sizingAgent(sizingProfileAuto, sizingProfileSmall, ptr.To[int64](2), nil)
+	agent.Spec.Storage = &agentv1alpha1.PlatformAgentStorageSpec{ExpectedClusterProfiles: ptr.To[int32](30)}
+	stored, recorder := resolveSizing(t, agent)
+	if stored.Status.EffectiveSizingTier != sizingProfileFleet {
+		t.Fatalf("status.effectiveSizingTier = %q, want fleet", stored.Status.EffectiveSizingTier)
+	}
+	if len(recorder.Events) != 1 {
+		t.Fatalf("got %d events, want the tier change alone", len(recorder.Events))
+	}
+	event := <-recorder.Events
+	for _, want := range []string{"sizing tier small -> fleet", "spec.storage.expectedClusterProfiles 30"} {
+		if !strings.Contains(event, want) {
+			t.Errorf("event lacks %q: %s", want, event)
+		}
+	}
+
+	// An observed step says nothing about the declared field.
+	observed := sizingAgent(sizingProfileAuto, sizingProfileSmall, ptr.To[int64](30), nil)
+	observed.Spec.Storage = &agentv1alpha1.PlatformAgentStorageSpec{ExpectedClusterProfiles: ptr.To[int32](5)}
+	_, recorder = resolveSizing(t, observed)
+	if event := <-recorder.Events; strings.Contains(event, "expectedClusterProfiles") {
+		t.Errorf("an observed step names the declared count: %s", event)
+	}
+}
+
+// TestADeclaredStepPassesTheQuotaGate: a step the declared count earns is
+// measured against the namespace's quotas as an observed one is, and capped
+// the same way.
+func TestADeclaredStepPassesTheQuotaGate(t *testing.T) {
+	t.Parallel()
+	agent := sizingAgent(sizingProfileAuto, sizingProfileSmall, nil, nil)
+	agent.Spec.Storage = &agentv1alpha1.PlatformAgentStorageSpec{ExpectedClusterProfiles: ptr.To[int32](30)}
+	stored, _ := resolveSizing(t, agent, sizingQuota("platform-baseline-quota", "1Gi", "0"))
+	if stored.Status.EffectiveSizingTier != sizingProfileSmall {
+		t.Fatalf("status.effectiveSizingTier = %q, want small under a quota with no room", stored.Status.EffectiveSizingTier)
+	}
+	cond := meta.FindStatusCondition(stored.Status.Conditions, sizingCappedByQuotaConditionType)
+	if cond == nil || !strings.Contains(cond.Message, "earns the fleet tier") {
+		t.Fatalf("SizingCappedByQuota = %+v, want the fleet step capped", cond)
+	}
+}
+
 func TestResolveSizingTierQuotaGate(t *testing.T) {
 	t.Parallel()
 	// The step from small to medium on a Standard cluster adds 3Gi of memory

@@ -1509,7 +1509,8 @@ platformAgent:
     # container start from, forwarded to the CR as spec.deployment.sizingProfile
     # when set: small (the operator's defaults, and what an unset value means),
     # medium, fleet, or auto, which steps the tier up as the fleet the operator
-    # counts grows, from the tier the CR's status last recorded (a count that
+    # counts grows (or as storage.expectedClusterProfiles declares, when that is
+    # larger), from the tier the CR's status last recorded (a count that
     # falls never lowers it), holding a step the namespace's ResourceQuota has
     # no room for or a LimitRange bound refuses, stepping back one tier when
     # admission refuses the pod a step recreated, and saying so in the CR's

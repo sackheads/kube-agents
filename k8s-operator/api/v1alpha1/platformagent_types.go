@@ -83,7 +83,10 @@ type PlatformAgentStorageSpec struct {
 	// default when Size is absent, so this only ever raises it. Raising it
 	// expands the existing claim online where the StorageClass allows. The
 	// shell sandbox's claim holds no session stores and keeps Size or the
-	// default. The formula passes the 50Gi default above 107 profiles.
+	// default. The formula passes the 50Gi default above 107 profiles. Under
+	// spec.deployment.sizingProfile auto, the count also seeds the sizing
+	// tier when it exceeds the observed cluster count; other profiles ignore
+	// it there.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=20000
 	// +optional

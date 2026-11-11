@@ -1450,8 +1450,11 @@ type DeploymentSpec struct {
 	// 8Gi limits and the 8Gi ephemeral-storage limit, the sidecar's memory
 	// limit to 8Gi and the shell's to 4Gi. "auto" promotes the tier from the
 	// cluster count the operator polls into status.usage, the larger of
-	// clustersRegistered and clustersMonitored: medium at 10 clusters, fleet
-	// at 25. It continues from the tier status.effectiveSizingTier holds,
+	// clustersRegistered and clustersMonitored, or from
+	// spec.storage.expectedClusterProfiles when that declares more, so an
+	// install that states its fleet starts at the tier the fleet earns:
+	// medium at 10 clusters, fleet at 25. It continues from the tier
+	// status.effectiveSizingTier holds,
 	// which is small on a CR that never named a tier and the explicit tier
 	// on one that did; set small first to restart it from small. A promotion
 	// is upward only, latched in that status field, so a count that falls
