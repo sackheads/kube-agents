@@ -705,5 +705,88 @@ class NoCallerWalksProfilesTest(unittest.TestCase):
         reader = (pathlib.Path(__file__).resolve().parent / "fleet_scope_targets.py").read_text(encoding="utf-8")
         self.assertEqual([f.split(":")[0] for f in self.walking_functions(reader)], ["profile_identities"])
 
+    def test_the_next_mode_readers_read_no_cluster_profile(self):
+        # #3658: the Home tab's board, the platform_control cluster tools and
+        # the front door's roster still read the profiles outside next (their
+        # today paths are unchanged, so the static check above does not hold
+        # them); under next none of them reads a Cluster Agent profile. The
+        # roster still lists the profiles directory there, for the specialists
+        # that are not per-cluster, but reads no cluster- profile in it.
+        import sqlite3
+        from datetime import datetime, timezone
+
+        import board_snapshot
+        import findings_queue
+        import scope_publisher
+
+        try:
+            import platform_mcp_server
+        except ImportError:  # a bare checkout: the MCP tests' stubs let it import
+            import test_platform_mcp_server  # noqa: F401
+            import platform_mcp_server
+        chat_scripts = pathlib.Path(__file__).resolve().parents[2] / "chat" / "scripts"
+        sys.path.insert(0, str(chat_scripts))
+        self.addCleanup(sys.path.remove, str(chat_scripts))
+        import agent_roster
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = pathlib.Path(tmp.name)
+        profiles = home / "profiles"
+        ghost = profiles / "cluster-ghost-proj-ghost-us-east1"
+        ghost.mkdir(parents=True)
+        for name in ("profile.yaml", "USER.md", "CAPABILITIES.md"):
+            (ghost / name).write_text("ghost\n", encoding="utf-8")
+        (ghost / "config.yaml").write_text(_identity_config("ghost-proj", "ghost", "us-east1"), encoding="utf-8")
+        (profiles / "platform").mkdir()
+        render = {"present": True, "projects": [], "folders": ["1"]}
+        (home / "scope.json").write_text(json.dumps(render), encoding="utf-8")
+        document = _resolved([("member-a", "ok")], clusters={"member-a": {"at": "2026-11-10T12:00:00Z", "clusters": [["us-central1", "web"]]}})
+        document["memberHash"] = scope_publisher.member_hash(render)
+        (home / "resolved-scope.json").write_text(json.dumps(document), encoding="utf-8")
+        env = mock.patch.dict(os.environ, {fst.SCOPE_FILE_ENV: str(home / "scope.json"),
+                                           fst.RESOLVED_SCOPE_FILE_ENV: str(home / "resolved-scope.json"),
+                                           "GCP_PROJECT_ID": "mgmt", "PLATFORM_AGENT_HOME": str(home)})
+        env.start()
+        self.addCleanup(env.stop)
+
+        real_iterdir = pathlib.Path.iterdir
+
+        def no_profiles_walk(path):
+            if path.name == "profiles":
+                raise AssertionError(f"listed {path}")
+            return real_iterdir(path)
+
+        def no_read(*_args, **_kwargs):
+            raise AssertionError("read a Cluster Agent profile")
+
+        session = sqlite3.connect(":memory:")
+        findings_queue.init_findings_schema(session)
+        with mock.patch.object(pathlib.Path, "iterdir", autospec=True, side_effect=no_profiles_walk), \
+                mock.patch.object(fst, "profile_identities", side_effect=no_read), \
+                mock.patch.object(platform_mcp_server, "is_ready_profile", side_effect=no_read), \
+                mock.patch.object(platform_mcp_server, "read_cluster_identity", side_effect=no_read):
+            board = board_snapshot.snapshot(session, None, datetime.now(timezone.utc), profiles, lambda: None)
+            listed = json.loads(platform_mcp_server.list_cluster_profiles())
+            resolved = json.loads(platform_mcp_server.get_cluster_profile_name("ghost-proj", "ghost", "us-east1"))
+        self.assertIn("web", [row["name"] for row in board["clusters"]])
+        self.assertNotIn("ghost", json.dumps(board))
+        self.assertIn({"project": "member-a", "cluster": "web", "location": "us-central1", "served_by": "cluster", "status": "listed"}, listed)
+        self.assertNotIn("ghost", json.dumps(listed))
+        self.assertIsNone(resolved["name"])
+
+        real_identity = agent_roster._cluster_identity
+
+        def no_cluster_profile(path):
+            if path.name.startswith("cluster-"):
+                raise AssertionError(f"read {path}")
+            return real_identity(path)
+
+        agent_roster._cache = None
+        self.addCleanup(setattr, agent_roster, "_cache", None)
+        with mock.patch.object(agent_roster, "_cluster_identity", side_effect=no_cluster_profile):
+            roster = agent_roster.render(profiles)
+        self.assertNotIn("ghost", roster)
+
 if __name__ == "__main__":
     unittest.main()

@@ -42,7 +42,10 @@ says nothing is copied across), so the agent carries the scope from the tool
 to the collector's `--scope-projects`, `--scope-unread` and
 `--scope-exclude-clusters`. The watch scripts' cluster lists come from
 `list_scope_clusters` below (#5621): the resolved scope under spec.mode: next,
-the Cluster Agent profiles otherwise. The reader is
+the Cluster Agent profiles otherwise. Under next the Slack Home tab's board
+(board_snapshot.py) and the platform_control `list_cluster_profiles` and
+`get_cluster_profile_name` tools read it too (#3658), and the front door's
+roster takes the mode from `resolved_scope_file`. The reader is
 deliberately independent of cluster_agent_reconcile.py, which writes the
 snapshot and owns its shape: that module's import has side effects.
 """
