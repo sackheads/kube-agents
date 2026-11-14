@@ -150,6 +150,10 @@ mcp_servers:
       GKE_LOCATION: "${GKE_LOCATION}"
       GCP_PROJECT_ID: "${GCP_PROJECT_ID}"
       KUBEAGENTS_SCOPE_FILE: "${KUBEAGENTS_SCOPE_FILE}"
+      # The scope publisher's resolved scope, set under spec.mode: next and
+      # pinned empty outside it: agent_roster.next_mode reads it, so
+      # list_agents names no per-cluster profile under next, as the block does.
+      KUBEAGENTS_RESOLVED_SCOPE_FILE: "${KUBEAGENTS_RESOLVED_SCOPE_FILE}"
       # The group size above which the roster counts a shared-role group
       # instead of naming each agent (agent_roster.summary_threshold; default
       # 20). spec.deployment.env sets it on the agent container through the

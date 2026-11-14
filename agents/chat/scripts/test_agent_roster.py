@@ -63,7 +63,7 @@ FLEET_SCALE_CLUSTER_FORMAT = "cluster-{index:04d}"
 ROSTER_ENV_NAMES = (
     "GKE_CLUSTER_NAME", "GKE_PROJECT_ID", "GKE_LOCATION", "GCP_PROJECT_ID",
     "KUBEAGENTS_SCOPE_FILE", "PLATFORM_AGENT_HOME",
-    "KUBEAGENTS_ROSTER_SUMMARY_THRESHOLD",
+    "KUBEAGENTS_ROSTER_SUMMARY_THRESHOLD", "KUBEAGENTS_RESOLVED_SCOPE_FILE",
 )
 # The one description every scaffolded Cluster Agent shares.
 CLUSTER_ROLE = "One cluster's runtime state.\n"
@@ -1525,6 +1525,77 @@ class TestFilter(unittest.TestCase):
         self.assertNotIn("cluster-p-a-us", out)
 
 
+class TestNextMode(unittest.TestCase):
+    """#3658: under spec.mode: next one `cluster` AgentProfile serves every
+    cluster in scope, so the roster names no per-cluster profile and says so
+    once. The mode is fleet_scope_targets' signal (KUBEAGENTS_RESOLVED_SCOPE_FILE
+    set), the one #5660's readers use."""
+
+    NEXT = {"KUBEAGENTS_RESOLVED_SCOPE_FILE": "/etc/kube-agents-resolved/resolved-scope.json"}
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name) / "profiles"
+        self.base.mkdir()
+        (self.base / "platform").mkdir()
+        (self.base / "platform" / "CAPABILITIES.md").write_text("Fleet + GitOps write path.")
+        _write_cluster_profile(self.base, "cluster-p-alpha-us-central1", "p", "alpha", "us-central1")
+        _write_cluster_profile(self.base, "cluster-p-beta-us-central1", "p", "beta", "us-central1")
+        _forget()
+        self.addCleanup(_forget)
+
+    def test_no_per_cluster_profile_is_listed_and_the_cluster_profile_is_said_once(self):
+        out = _render_roster(self.base, self.NEXT)
+        self.assertIn("- platform: Fleet + GitOps write path.", out)
+        self.assertNotIn("cluster-p-alpha", out)
+        self.assertNotIn("alpha", out)
+        self.assertEqual(out.count(agent_roster.NEXT_CLUSTER_AGENT_LINE), 1)
+        # The line is no assignee bullet the footer would have the model copy.
+        self.assertFalse(agent_roster.NEXT_CLUSTER_AGENT_LINE.startswith("- "))
+        self.assertIn("`platform`", agent_roster.NEXT_CLUSTER_AGENT_LINE)
+
+    def test_next_mode_reads_no_cluster_profile(self):
+        from unittest import mock
+
+        with mock.patch.object(agent_roster, "_cluster_identity", wraps=agent_roster._cluster_identity) as identities, \
+                mock.patch.object(agent_roster, "_responsibilities", wraps=agent_roster._responsibilities) as described:
+            _render_roster(self.base, self.NEXT)
+        self.assertEqual([c.args[0].name for c in described.call_args_list], ["platform"])
+        self.assertEqual([c.args[0].name for c in identities.call_args_list], ["platform"])
+
+    def test_a_filter_for_a_cluster_says_route_to_platform_with_its_place(self):
+        out = _render_filtered("alpha", self.base, self.NEXT)
+        self.assertEqual(out, agent_roster.FILTER_NONE_NEXT.format(query="alpha", total=1))
+        self.assertIn("project, location", out)
+        self.assertNotIn("no cluster agent yet", out)
+
+    def test_the_router_placeholder_is_today_mode(self):
+        # The router child gets ${KUBEAGENTS_RESOLVED_SCOPE_FILE} literally when
+        # the variable is unset; that is not a path, so not next mode.
+        out = _render_roster(self.base, {"KUBEAGENTS_RESOLVED_SCOPE_FILE": "${KUBEAGENTS_RESOLVED_SCOPE_FILE}"})
+        self.assertIn("cluster-p-alpha-us-central1", out)
+        self.assertNotIn(agent_roster.NEXT_CLUSTER_AGENT_LINE, out)
+
+    def test_switching_mode_is_not_served_from_the_cache(self):
+        for path in (self.base, *self.base.iterdir()):
+            _age(path)
+        today = _render_roster(self.base, {})
+        self.assertIn("cluster-p-alpha-us-central1", today)
+        self.assertNotIn("cluster-p-alpha", _render_roster(self.base, self.NEXT))
+
+    def test_today_mode_is_unchanged(self):
+        # Equivalence: the operator pins the variable empty outside next, and
+        # the roster is the one an unset variable renders.
+        unset = _render_roster(self.base, {})
+        _forget()
+        self.assertEqual(_render_roster(self.base, {"KUBEAGENTS_RESOLVED_SCOPE_FILE": ""}), unset)
+        self.assertIn("cluster-p-alpha-us-central1 (the alpha cluster agent", unset)
+        _forget()
+        self.assertEqual(_render_filtered("alpha", self.base, {"KUBEAGENTS_RESOLVED_SCOPE_FILE": ""}),
+                         _render_filtered("alpha", self.base, {}))
+
+
 class TestRouterEnvCarriesTheRosterInputs(unittest.TestCase):
     """list_agents renders what the injected block renders only if its env block passes the inputs."""
 
@@ -1537,7 +1608,7 @@ class TestRouterEnvCarriesTheRosterInputs(unittest.TestCase):
                   agent_roster.HOST_PROJECT_ENV, agent_roster.SUMMARY_THRESHOLD_ENV}
         reader = agent_roster._scope_reader()
         self.assertIsNotNone(reader)
-        needed |= {reader.SCOPE_FILE_ENV, *reader.MANAGEMENT_PROJECT_ENVS}
+        needed |= {reader.SCOPE_FILE_ENV, *reader.MANAGEMENT_PROJECT_ENVS, reader.RESOLVED_SCOPE_FILE_ENV}
         for name in sorted(needed):
             self.assertEqual(env.get(name), "${" + name + "}", name)
 

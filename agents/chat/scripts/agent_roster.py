@@ -20,6 +20,11 @@
 # that disagrees with itself between the injected block and the tool is worse
 # than either one alone.
 #
+# Under spec.mode: next one `cluster` AgentProfile serves every cluster in
+# scope (#3658), so the roster lists no per-cluster profile and says that once
+# (NEXT_CLUSTER_AGENT_LINE); the mode is fleet_scope_targets' signal, the one
+# the platform agent's cluster-list readers use.
+#
 # Everything here degrades rather than raises. The profiles live on a shared
 # PVC, so an I/O or permission fault must not turn routing into a traceback.
 
@@ -92,6 +97,13 @@ FILTER_NONE = (
     "cluster with no match has no cluster agent yet: route the request to "
     "`platform`, which owns cluster-agent lifecycle."
 )
+# The no-match under spec.mode: next, where no cluster has an agent of its own
+# to match: the request still goes to `platform`, with the cluster's place.
+FILTER_NONE_NEXT = (
+    'No specialist agent matches "{query}" ({total} on the roster). Under this '
+    "install's mode no cluster has an agent of its own: route work on a cluster "
+    "to `platform`, naming its project, location and cluster."
+)
 # A no-match from a walk that could not read every profile. Deliberately not
 # FILTER_NONE, for the reason UNKNOWN_ROSTER is not EMPTY_ROSTER: the profile
 # the filter was looking for may be the one the walk skipped.
@@ -118,6 +130,18 @@ CACHE_RACY_NS = CACHE_RACY_SECONDS * 1_000_000_000
 # directory first and rewrites config.yaml in place afterwards
 # (cluster_agent_profile.py), which moves no mtime of the profiles directory.
 CLUSTER_PROFILE_PREFIX = "cluster-"
+
+# Under spec.mode: next, the roster's one line about the Cluster Agents in
+# place of a line per cluster- profile. Not a "- name:" bullet: the plugin's
+# footer has the model copy a bullet's name as an assignee, and `cluster` is no
+# kanban assignee.
+NEXT_CLUSTER_AGENT_LINE = (
+    "Cluster Agents: under this install's mode one `cluster` profile serves "
+    "every cluster in scope, given the cluster's project, location and name; "
+    "there is no agent per cluster, and `cluster` is not a kanban assignee. "
+    "Route work on a specific cluster to `platform`, naming its project, "
+    "location and cluster."
+)
 
 # The cluster_identity block a Cluster Agent's config.yaml carries
 # (agents/platform/scripts/cluster_agent_profile.py, _inject_cluster_identity):
@@ -275,6 +299,28 @@ def _cluster_identity(home: Path) -> dict[str, str]:
     return identity if identity.get(IDENTITY_NAME_KEY) else {}
 
 
+def next_mode() -> bool:
+    """Whether this install runs spec.mode: next, by fleet_scope_targets' signal.
+
+    The resolved scope's path is set under next and pinned empty outside it.
+    The router child gets the literal ``${...}`` placeholder for an unset one,
+    which is unset. A reader that cannot be imported reads as today, the
+    fail-closed side the operator's mode render takes.
+    """
+    reader = _scope_reader()
+    name = getattr(reader, "RESOLVED_SCOPE_FILE_ENV", None) if reader is not None else None
+    if not name:
+        return False
+    if os.environ.get(name, "").startswith(UNEXPANDED_PLACEHOLDER_PREFIX):
+        os.environ.pop(name, None)
+    resolved = getattr(reader, "resolved_scope_file", None)
+    try:
+        return bool(callable(resolved) and resolved())
+    except Exception as e:  # noqa: BLE001 - the roster degrades, it does not raise
+        log(f"cannot read the mode: {e}")
+        return False
+
+
 def discover(base: Path | None = None) -> list[dict[str, str]] | None:
     """Enumerate every routable specialist profile (all profiles except `default`).
 
@@ -289,8 +335,13 @@ def discover(base: Path | None = None) -> list[dict[str, str]] | None:
     ``base`` defaults to the module-level ``PROFILES_BASE`` at call time rather
     than at import time, so a caller (or a test) that rebinds ``PROFILES_BASE``
     is still honoured.
+
+    Under spec.mode: next a cluster- profile is skipped unread: the `cluster`
+    AgentProfile serves its cluster, and a profile left from before is no
+    agent to route to.
     """
     root = PROFILES_BASE if base is None else base
+    skip_clusters = next_mode()
     agents: list[dict[str, str]] = []
     try:
         entries = sorted(root.iterdir()) if root.is_dir() else []
@@ -299,6 +350,8 @@ def discover(base: Path | None = None) -> list[dict[str, str]] | None:
         return None
     for p in entries:
         try:
+            if skip_clusters and p.name.startswith(CLUSTER_PROFILE_PREFIX):
+                continue
             if not p.is_dir() or p.name == SELF_PROFILE or p.name.startswith("."):
                 continue
             agent = {"name": p.name, "responsibilities": _responsibilities(p)}
@@ -424,7 +477,7 @@ def _matches_exactly(agent: dict[str, str], query: str) -> bool:
 
 
 def format_matches(
-    agents: list[dict[str, str]] | None, query: str, degraded: bool = False
+    agents: list[dict[str, str]] | None, query: str, degraded: bool = False, next_mode: bool = False
 ) -> str | None:
     """The agents matching ``query``, rendered as format_roster renders them, or ``None``.
 
@@ -436,14 +489,15 @@ def format_matches(
     half-read a profile (the per-profile faults only: a scope or
     management-project fault leaves every profile read, so a no-match is
     still a fact); a no-match from such a walk is reported as unread, not as
-    absent.
+    absent. ``next_mode`` (spec.mode: next) says no cluster has an agent of
+    its own, so a no-match routes to `platform` without promising one.
     """
     if agents is None:
         return None
     needle = query.strip().lower()
     matched = [a for a in agents if _matches(a, needle)]
     if not matched:
-        none = FILTER_UNREAD if degraded else FILTER_NONE
+        none = FILTER_UNREAD if degraded else FILTER_NONE_NEXT if next_mode else FILTER_NONE
         return none.format(query=query.strip(), total=len(agents))
     # sort() is stable, so the substring matches keep their discovery order.
     matched.sort(key=lambda a: not _matches_exactly(a, needle))
@@ -721,7 +775,7 @@ def _cache_key_for(root: Path) -> tuple | None:
             stamps.append(_mtime_ns(Path(render_path)))
     if _racy(stamps):
         return None
-    return (str(root), *stamps, summary_threshold())
+    return (str(root), *stamps, summary_threshold(), next_mode())
 
 
 def _unstamped(agents: list[dict[str, str]]) -> list[str]:
@@ -783,7 +837,8 @@ def _discover_and_render(
     if roster is None:
         text = None
     else:
-        extra = [b for b in (_format_host(read_host_identity(agents, root)), _format_scope(root)) if b]
+        cluster_line = NEXT_CLUSTER_AGENT_LINE if next_mode() else ""
+        extra = [b for b in (cluster_line, _format_host(read_host_identity(agents, root)), _format_scope(root)) if b]
         text = "\n\n".join([roster, *extra])
     degraded = _faults != faults_before
     if degraded and key is not None:
@@ -816,4 +871,4 @@ def render_filtered(query: str, base: Path | None = None) -> str | None:
     never as "no such agent": the skipped profile may be the one asked for.
     """
     agents, _, degraded = _discover_and_render(base)
-    return format_matches(agents, query, degraded=degraded)
+    return format_matches(agents, query, degraded=degraded, next_mode=next_mode())
