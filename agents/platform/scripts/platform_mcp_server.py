@@ -466,6 +466,59 @@ def fleet_scope() -> str:
     }, indent=2)
 
 
+# Under spec.mode: next one `cluster` AgentProfile, given a project, location
+# and cluster, serves every cluster in scope (#3658), so the two tools below
+# answer from the resolved scope (fleet_scope_targets.list_scope_clusters) and
+# never offer a per-cluster profile name: a kanban card filed to one is the
+# route that retires. Outside next they read the profiles, as before.
+CLUSTER_AGENT_PROFILE = "cluster"
+NEXT_RESOLVE_NOTE = (
+    "There is no per-cluster profile under spec.mode: next: the `cluster` AgentProfile serves every "
+    "cluster in scope, given `parameters`. Do not file a kanban card to a per-cluster name for it; "
+    "delegate to `cluster` with these parameters."
+)
+NEXT_OUT_OF_SCOPE_NOTE = " The resolved scope does not hold this cluster (`in_scope` false), so it is not managed here."
+NEXT_UNKNOWN_SCOPE_NOTE = (
+    " The resolved scope holds no cluster list for this project (`in_scope` null), so whether the "
+    "cluster is in scope is unknown, not no."
+)
+
+
+def _next_mode_scope():
+    """The resolved scope's clusters under spec.mode: next, else None (the profiles answer)."""
+    if fleet_scope_targets.resolved_scope_file() is None:
+        return None
+    return fleet_scope_targets.list_scope_clusters(Path(os.environ.get("PLATFORM_AGENT_HOME") or DEFAULT_AGENT_HOME))
+
+
+def _next_mode_roster(scope) -> list[dict]:
+    """Each listed cluster served by the `cluster` profile, and each project the scope holds no list for."""
+    out: list[dict] = []
+    for entry in scope.projects:
+        if entry.status == fleet_scope_targets.STATUS_LISTED:
+            out.extend({"project": project, "cluster": cluster, "location": location,
+                        "served_by": CLUSTER_AGENT_PROFILE, "status": entry.status}
+                       for project, location, cluster in entry.clusters or ())
+        else:
+            out.append({"project": entry.project, "served_by": CLUSTER_AGENT_PROFILE, "status": entry.status,
+                        "reason": entry.reason or ""})
+    return out
+
+
+def _in_scope(scope, project: str, cluster: str, location: str) -> bool | None:
+    """Whether the resolved scope holds the cluster: None where it holds no list to say."""
+    want = (project.lower(), location.lower(), cluster.lower())
+    if any(tuple(v.lower() for v in ref) == want for ref in scope.excluded_clusters):
+        return False
+    entry = next((e for e in scope.projects if e.project.lower() == want[0]), None)
+    if entry is None:
+        unresolved = any(e.project == fleet_scope_targets.UNRESOLVED_SCOPE_ROW for e in scope.projects)
+        return None if unresolved else False
+    if entry.status != fleet_scope_targets.STATUS_LISTED:
+        return None
+    return any(tuple(v.lower() for v in ref) == want for ref in entry.clusters or ())
+
+
 @mcp.tool()
 def list_cluster_profiles() -> str:
     """
@@ -474,8 +527,19 @@ def list_cluster_profiles() -> str:
     Returns JSON: a list of {name, project, cluster, location}. `name` is the
     kanban assignee for delegating work on that cluster. A profile scaffolded
     without its identity stamp has only `name`.
+
+    Under spec.mode: next there are no per-cluster profiles: the list is the
+    resolved scope's clusters, each {project, cluster, location, served_by:
+    "cluster", status: "listed"}, served by the one `cluster` AgentProfile
+    given those three, and no entry has a `name` to file a card to. A project
+    the scope holds no cluster list for is one entry {project, served_by,
+    status, reason}: `list-live` (the management and explicit projects; list
+    their clusters with gcloud) or `unread` (not known, never "no clusters").
     """
     try:
+        scope = _next_mode_scope()
+        if scope is not None:
+            return json.dumps(_next_mode_roster(scope), indent=2)
         return json.dumps(_cluster_agent_roster(), indent=2)
     except Exception as e:
         return f"ERROR: Could not read the Cluster Agent roster: {e}"
@@ -494,6 +558,13 @@ def get_cluster_profile_name(project: str, cluster: str, location: str) -> str:
     cluster: sanitizing can map two clusters to one name, and the profile's own
     identity is what it works on.
 
+    Under spec.mode: next there is no per-cluster profile: 'name' is null and
+    'exists' false, 'served_by' is "cluster" (the one AgentProfile that serves
+    every cluster in scope), 'parameters' are the project, location and
+    cluster to give it, 'in_scope' says whether the resolved scope holds the
+    cluster (null when it holds no list for the project), and 'note' says
+    what to do.
+
     Args:
         project: The GCP project the cluster is in. Required: the name is
             derived from it, and the agent's own project is the wrong answer for
@@ -503,6 +574,16 @@ def get_cluster_profile_name(project: str, cluster: str, location: str) -> str:
     """
     if not (project and cluster and location):
         return "ERROR: project, cluster and location are all required."
+    try:
+        scope = _next_mode_scope()
+    except Exception as e:  # noqa: BLE001 - a tool answers, it does not raise
+        return f"ERROR: Could not read the resolved scope: {e}"
+    if scope is not None:
+        in_scope = _in_scope(scope, project, cluster, location)
+        note = NEXT_RESOLVE_NOTE + {False: NEXT_OUT_OF_SCOPE_NOTE, None: NEXT_UNKNOWN_SCOPE_NOTE}.get(in_scope, "")
+        return json.dumps({"name": None, "exists": False, "served_by": CLUSTER_AGENT_PROFILE,
+                           "parameters": {"project": project, "location": location, "cluster": cluster},
+                           "in_scope": in_scope, "note": note}, indent=2)
     name = profile_name(project, cluster, location)
     home = _profiles_dir() / name
     exists = is_ready_profile(home)

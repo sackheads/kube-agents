@@ -1828,6 +1828,110 @@ class TestClusterAgentRoster(unittest.TestCase):
         self.assertEqual([], json.loads(platform_mcp_server.list_cluster_profiles()))
 
 
+class TestClusterAgentRosterNextMode(unittest.TestCase):
+    """#3658: under spec.mode: next one `cluster` AgentProfile serves every
+    cluster in scope, so the two tools answer from the resolved scope
+    (fleet_scope_targets.list_scope_clusters) and name no per-cluster profile."""
+
+    RENDER = {"present": True, "projects": ["explicit-a"], "folders": ["1"],
+              "exclude": {"clusters": [{"projectId": "member-a", "location": "us-central1", "clusterName": "skipped"}]}}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name)
+        # A ready per-cluster profile the old answer would name.
+        ghost = self.home / "profiles" / "cluster-member-a-web-us-central1"
+        ghost.mkdir(parents=True)
+        for name in ("profile.yaml", "USER.md"):
+            (ghost / name).write_text("")
+        (ghost / "config.yaml").write_text(json.dumps({"cluster_identity": {"project": "member-a", "cluster": "web", "location": "us-central1"}}))
+        env = patch.dict(os.environ, {"PLATFORM_AGENT_HOME": self.tmp.name, "GCP_PROJECT_ID": "mgmt"})
+        env.start()
+        self.addCleanup(env.stop)
+        for name in ("KUBEAGENTS_SCOPE_FILE", "KUBEAGENTS_RESOLVED_SCOPE_FILE"):
+            os.environ.pop(name, None)
+
+    def _next(self, rows=(("member-a", "ok"), ("member-b", "denied")), clusters=None):
+        import scope_publisher
+
+        clusters = clusters if clusters is not None else {
+            "member-a": {"at": "2026-11-10T12:00:00Z", "clusters": [["us-central1", "web"], ["us-central1", "skipped"]]}}
+        (self.home / "scope.json").write_text(json.dumps(self.RENDER))
+        (self.home / "resolved-scope.json").write_text(json.dumps({
+            "v": 1, "resolvedAt": "2026-11-10T12:00:00Z", "state": "ok", "memberHash": scope_publisher.member_hash(self.RENDER),
+            "excludedProjects": [], "clusters": clusters,
+            "projects": [{"id": p, "via": ["folders/1"], "outcome": o, "confirmedAt": "2026-11-10T12:00:00Z"} for p, o in rows]}))
+        os.environ["KUBEAGENTS_SCOPE_FILE"] = str(self.home / "scope.json")
+        os.environ["KUBEAGENTS_RESOLVED_SCOPE_FILE"] = str(self.home / "resolved-scope.json")
+
+    def test_list_names_the_scopes_clusters_served_by_the_cluster_profile(self):
+        self._next()
+        got = json.loads(platform_mcp_server.list_cluster_profiles())
+        self.assertIsInstance(got, list)
+        listed = [e for e in got if e.get("status") == "listed"]
+        self.assertEqual(listed, [{"project": "member-a", "cluster": "web", "location": "us-central1",
+                                   "served_by": "cluster", "status": "listed"}])
+        # No per-cluster profile name is offered as an assignee.
+        self.assertFalse(any("name" in e for e in got))
+
+    def test_list_names_each_project_it_holds_no_cluster_list_for(self):
+        self._next()
+        got = {e["project"]: e for e in json.loads(platform_mcp_server.list_cluster_profiles()) if e.get("status") != "listed"}
+        self.assertEqual(got["mgmt"]["status"], "list-live")
+        self.assertEqual(got["explicit-a"]["status"], "list-live")
+        # An unread member is named with why, never left out as a project with no clusters.
+        self.assertEqual(got["member-b"]["status"], "unread")
+        self.assertIn("denied", got["member-b"]["reason"])
+        self.assertEqual(got["member-b"]["served_by"], "cluster")
+
+    def test_resolve_answers_with_the_cluster_profile_and_its_parameters(self):
+        self._next()
+        got = json.loads(platform_mcp_server.get_cluster_profile_name("member-a", "web", "us-central1"))
+        self.assertIsNone(got["name"])
+        self.assertFalse(got["exists"])
+        self.assertEqual(got["served_by"], "cluster")
+        self.assertEqual(got["parameters"], {"project": "member-a", "location": "us-central1", "cluster": "web"})
+        self.assertTrue(got["in_scope"])
+        self.assertIn("no per-cluster profile", got["note"])
+        self.assertIn("kanban", got["note"])
+
+    def test_resolve_says_whether_the_scope_holds_the_cluster(self):
+        self._next()
+        cases = {
+            ("member-a", "skipped", "us-central1"): False,  # excluded
+            ("member-a", "other", "us-central1"): False,    # its project is listed and the cluster is not in it
+            ("outsider", "x", "us-central1"): False,        # not a project in scope
+            ("member-b", "x", "us-central1"): None,         # unread: unknown, not "no"
+            ("mgmt", "host", "us-central1"): None,          # listed live: the scope holds no list
+        }
+        for (project, cluster, location), want in cases.items():
+            with self.subTest(project=project, cluster=cluster):
+                got = json.loads(platform_mcp_server.get_cluster_profile_name(project, cluster, location))
+                self.assertIs(got["in_scope"], want)
+                self.assertFalse(got["exists"])
+
+    def test_resolve_still_requires_all_three(self):
+        self._next()
+        self.assertTrue(platform_mcp_server.get_cluster_profile_name("member-a", "", "us-central1").startswith("ERROR"))
+
+    def test_an_unreadable_render_is_an_error_answer(self):
+        self._next()
+        os.environ["KUBEAGENTS_SCOPE_FILE"] = str(self.home / "absent.json")
+        self.assertTrue(platform_mcp_server.list_cluster_profiles().startswith("ERROR"))
+
+    def test_today_mode_ignores_a_resolved_scope_on_disk(self):
+        # Equivalence: the operator pins the variable empty outside next, and
+        # both tools then answer from the profiles exactly as before.
+        today_list = platform_mcp_server.list_cluster_profiles()
+        today_name = platform_mcp_server.get_cluster_profile_name("member-a", "web", "us-central1")
+        self._next()
+        os.environ["KUBEAGENTS_RESOLVED_SCOPE_FILE"] = ""
+        self.assertEqual(platform_mcp_server.list_cluster_profiles(), today_list)
+        self.assertEqual(platform_mcp_server.get_cluster_profile_name("member-a", "web", "us-central1"), today_name)
+        self.assertEqual(json.loads(today_name), {"name": "cluster-member-a-web-us-central1", "exists": True})
+
+
 
 class FleetScopeToolTest(unittest.TestCase):
     """fleet_scope: the declared scope's resolved projects and the collector
