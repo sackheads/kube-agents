@@ -1105,6 +1105,8 @@ spec:
               value: https://platformagent-kube-proxy.kubeagents-system.svc.cluster.local:8443
             - name: KUBE_PROXY_CA_FILE
               value: /var/run/secrets/kubeagents/kube-proxy-ca/ca.crt
+            - name: FLEET_AUDIT_REPORT_STORE
+              value: broker
             - name: GKE_PROJECT_ID
               value: example-project
             - name: GKE_CLUSTER_NAME

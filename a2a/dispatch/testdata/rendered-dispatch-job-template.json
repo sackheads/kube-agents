@@ -13,7 +13,7 @@
       "kubeagents.x-k8s.io/a2a-component": "dispatcher"
     },
     "annotations": {
-      "kubeagents.x-k8s.io/dispatch-template-hash": "fbbe8ed88100fccd"
+      "kubeagents.x-k8s.io/dispatch-template-hash": "9ba7a0d8d70d2b61"
     }
   },
   "spec": {
@@ -224,6 +224,10 @@
               {
                 "name": "CREDENTIAL_PROXY_TASK_TOKEN_FILE",
                 "value": "/var/run/kube-agents/task-token/token"
+              },
+              {
+                "name": "FLEET_AUDIT_REPORT_STORE",
+                "value": "broker"
               },
               {
                 "name": "A2A_MODEL",

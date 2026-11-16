@@ -103,6 +103,14 @@ const (
 	// The fleet-audit profile the builtin audits run on, and the platform
 	// specialist (docs/designs/scheduling-on-profiles.md §1 item 4).
 	auditReportProfiles = "fleet-audit,platform"
+	// The fleet-audit scripts' store switch (report_status.REPORT_STORE_ENV):
+	// "broker" sends their reads and writes to the broker's /v1/audit-reports
+	// rather than the pod's own /opt/data/fleet-audit/reports. Rendered on the
+	// shell sandbox's shell container and on profile workers, on every
+	// install; reserved, so a CR cannot point either back at a local store
+	// the gateway's store does not see.
+	fleetAuditReportStoreEnv    = "FLEET_AUDIT_REPORT_STORE"
+	fleetAuditReportStoreBroker = "broker"
 )
 
 // auditReportStoreEnvNames are reserved in mergeCredentialProxyEnv: a CR
@@ -120,6 +128,7 @@ var auditReportStoreEnvNames = []string{
 	auditReportStoreURLEnv,
 	auditReportStoreTokenFileEnv,
 	auditReportProfilesEnv,
+	fleetAuditReportStoreEnv,
 	"FLEET_AUDIT_REPORTS_DIR",
 	"AUDIT_REPORT_STORE_API_SERVER",
 	"AUDIT_REPORT_STORE_SA_DIR",

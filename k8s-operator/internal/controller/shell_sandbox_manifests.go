@@ -572,6 +572,12 @@ func buildShellSandboxStatefulSet(agent *agentv1alpha1.PlatformAgent, authorized
 		env = append(env,
 			corev1.EnvVar{Name: "KUBE_PROXY_URL", Value: kubeProxyURL(agent)},
 			corev1.EnvVar{Name: "KUBE_PROXY_CA_FILE", Value: kubeProxyCACertFile},
+			// The fleet-audit scripts read and write the report store through
+			// the broker (#5619): the store is on the gateway's volume, where
+			// the A2A gateway and profile workers find it, not this pod's.
+			// Inside this block because the switch needs the broker's address
+			// and the shell's token above.
+			corev1.EnvVar{Name: fleetAuditReportStoreEnv, Value: fleetAuditReportStoreBroker},
 		)
 	}
 	if harness := agent.Spec.Harness; harness != nil && harness.ProjectID != "" && harness.Location != "" && harness.ClusterName != "" {

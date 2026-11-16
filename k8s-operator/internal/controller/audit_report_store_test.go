@@ -282,3 +282,58 @@ func TestReconcileAuditReportStore(t *testing.T) {
 		t.Errorf("deleted a NetworkPolicy it does not own: %v", err)
 	}
 }
+
+// The fleet-audit scripts' store switch is "broker" on the shell sandbox's
+// shell container and on every profile worker, pool or Job, whatever the
+// retired spec.mode says (#5619).
+func TestFleetAuditReportStoreSwitchRendersOnTheShellAndWorkers(t *testing.T) {
+	for _, mode := range []string{"", "today", "next"} {
+		agent := reportStoreAgent(mode)
+		sts := buildShellSandboxStatefulSet(agent, "keys", credentialProxySandboxURL(agent), "")
+		for _, c := range sts.Spec.Template.Spec.Containers {
+			if got, _ := storeEnvValue(c.Env, fleetAuditReportStoreEnv); got != fleetAuditReportStoreBroker {
+				t.Errorf("mode %q: sandbox container %s has %s=%q", mode, c.Name, fleetAuditReportStoreEnv, got)
+			}
+		}
+		profile := testAgentProfile(agent.Namespace, "fleet-audit")
+		for _, workerMode := range []profileWorkerMode{profileWorkerPool, profileWorkerOneShot} {
+			spec := buildProfileWorkerPodSpec(agent, &profile, "unattended", "agentprofile-fleet-audit-unattended", workerMode, false)
+			for _, c := range spec.Containers {
+				if got, _ := storeEnvValue(c.Env, fleetAuditReportStoreEnv); got != fleetAuditReportStoreBroker {
+					t.Errorf("mode %q: worker container %s has %s=%q", mode, c.Name, fleetAuditReportStoreEnv, got)
+				}
+			}
+		}
+	}
+}
+
+// The switch never reaches the gateway's platform-agent container, whose
+// shell writes the file store on the volume the listener serves.
+func TestFleetAuditReportStoreSwitchIsNotOnTheGateway(t *testing.T) {
+	agent := reportStoreAgent("")
+	for _, c := range buildPodTemplateSpec(agent, "", "", "", "", nil, renderOptions{}).Spec.Containers {
+		if _, set := storeEnvValue(c.Env, fleetAuditReportStoreEnv); set {
+			t.Errorf("gateway container %s has %s", c.Name, fleetAuditReportStoreEnv)
+		}
+	}
+}
+
+// A CR cannot set the switch through spec.deployment.env: it is reserved
+// where that env is merged, and the sandbox forwards it from nowhere.
+func TestFleetAuditReportStoreSwitchIsReserved(t *testing.T) {
+	agent := reportStoreAgent("")
+	agent.Spec.Deployment = &agentv1alpha1.DeploymentSpec{Env: []corev1.EnvVar{
+		{Name: fleetAuditReportStoreEnv, Value: "file"},
+	}}
+	for _, env := range [][]corev1.EnvVar{
+		buildAgentAPIAuthEnv(agent),
+		buildCredentialProxyContainer(agent).Env,
+		buildShellSandboxStatefulSet(agent, "keys", credentialProxySandboxURL(agent), "").Spec.Template.Spec.Containers[0].Env,
+	} {
+		for _, e := range env {
+			if e.Name == fleetAuditReportStoreEnv && e.Value == "file" {
+				t.Errorf("spec.deployment.env set %s=%q", e.Name, e.Value)
+			}
+		}
+	}
+}
