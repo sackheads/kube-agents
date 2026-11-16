@@ -227,6 +227,10 @@
                 "value": "/var/run/kube-agents/task-token/token"
               },
               {
+                "name": "FLEET_AUDIT_REPORT_STORE",
+                "value": "broker"
+              },
+              {
                 "name": "A2A_MODEL",
                 "value": "model-default"
               },

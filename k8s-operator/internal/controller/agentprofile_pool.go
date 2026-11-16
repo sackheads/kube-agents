@@ -143,6 +143,9 @@ func buildProfileWorkerPodSpec(agent *agentv1alpha1.PlatformAgent, profile *agen
 		{Name: "CREDENTIAL_PROXY_URL", Value: credentialProxyURL(agent)},
 		{Name: "CREDENTIAL_PROXY_TOKEN_FILE", Value: profileWorkerBrokerTokenPath + "/" + profileWorkerBrokerTokenFile},
 		{Name: "CREDENTIAL_PROXY_TASK_TOKEN_FILE", Value: profileWorkerTaskTokenPath + "/token"},
+		// The fleet-audit scripts keep their reports in the broker store: the
+		// pod has no volume of its own to keep them on.
+		{Name: fleetAuditReportStoreEnv, Value: fleetAuditReportStoreBroker},
 	}
 	// The exec tier, while it renders, as for the sandbox: read at start, so a
 	// change between 0 and a positive count rolls the warm pools.
