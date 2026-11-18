@@ -22,10 +22,14 @@
 #     snapshot the collectors need as arguments on an install that declares a
 #     scope (the platform_control fleet_scope tool's collector_args), and the
 #     cron roster arm.py fires the job from;
-#   - the container that runs `audit_report.py finish` holds the report store
-#     and the scratch directory: the shell sandbox's `shell` container when the
-#     sandbox is on, else the gateway's `platform-agent` container, in the same
-#     order as `make fleet-audit-view`. plant.py runs there.
+#   - the container that runs `audit_report.py finish` holds the scratch
+#     directory: the shell sandbox's `shell` container when the sandbox is on,
+#     else the gateway's `platform-agent` container, in the same order as `make
+#     fleet-audit-view`. plant.py plants there;
+#   - the report store is the broker's when the shell writes through it (#6110),
+#     its files under the same root on the gateway pod's data volume, so the
+#     teardown removes the store's envelopes in the gateway's `platform-agent`
+#     container (teardown_all), and the scratch files where they are.
 
 terraform {
   required_version = ">= 1.5.0"
@@ -42,13 +46,15 @@ locals {
   pod_selector = "app.kubernetes.io/name=platform-agent"
   # In this order: the sandbox first, then the gateway.
   store_containers = "shell platform-agent"
-  scripts_dir      = "/opt/data/skills/fleet-audit/scripts"
-  home             = "/opt/data"
-  python           = "/opt/hermes/.venv/bin/python3"
-  audit_job        = "fleet-consistency-drift"
-  pod_wait         = 5
-  plant_b64        = base64encode(file("${path.module}/plant.py"))
-  arm_b64          = base64encode(file("${path.module}/arm.py"))
+  # Where the store's files are: the gateway's data volume, whichever container writes them.
+  teardown_container = "platform-agent"
+  scripts_dir        = "/opt/data/skills/fleet-audit/scripts"
+  home               = "/opt/data"
+  python             = "/opt/hermes/.venv/bin/python3"
+  audit_job          = "fleet-consistency-drift"
+  pod_wait           = 5
+  plant_b64          = base64encode(file("${path.module}/plant.py"))
+  arm_b64            = base64encode(file("${path.module}/arm.py"))
   # The one line the fleet_scope tool hands the agent, read from the same
   # snapshot in the agent container; empty on an install with no declared scope.
   scope_script = <<-PY
@@ -67,22 +73,23 @@ locals {
 
 resource "null_resource" "previous_scheduled_run" {
   triggers = {
-    host_cluster     = var.host_cluster_name
-    host_location    = var.host_cluster_location
-    host_project     = var.project_id
-    namespace        = var.agent_namespace
-    deployment       = var.agent_deployment
-    container        = var.agent_container
-    mark             = var.mark
-    pod_selector     = local.pod_selector
-    store_containers = local.store_containers
-    scripts_dir      = local.scripts_dir
-    home             = local.home
-    python           = local.python
-    audit_job        = local.audit_job
-    pod_wait         = local.pod_wait
-    plant_b64        = local.plant_b64
-    arm_b64          = local.arm_b64
+    host_cluster       = var.host_cluster_name
+    host_location      = var.host_cluster_location
+    host_project       = var.project_id
+    namespace          = var.agent_namespace
+    deployment         = var.agent_deployment
+    container          = var.agent_container
+    mark               = var.mark
+    pod_selector       = local.pod_selector
+    store_containers   = local.store_containers
+    teardown_container = local.teardown_container
+    scripts_dir        = local.scripts_dir
+    home               = local.home
+    python             = local.python
+    audit_job          = local.audit_job
+    pod_wait           = local.pod_wait
+    plant_b64          = local.plant_b64
+    arm_b64            = local.arm_b64
   }
 
   provisioner "local-exec" {
@@ -104,6 +111,28 @@ resource "null_resource" "previous_scheduled_run" {
           kubectl exec -i -n "${var.agent_namespace}" "$pod" -c "$container" -- \
             env PYTHONDONTWRITEBYTECODE=1 python3 - "$@"
       }
+      # Undo the plant: read its state where the scratch is, remove the store's
+      # envelopes where the store's files are, then the scratch files.
+      teardown_all() {
+        local ns="$1" plant_pod="$2" plant_container="$3" scripts="$4" mark="$5" b64="$6" teardown_container="$7"
+        local state store_pod running names
+        state="$(printf '%s' "$b64" | base64 -d | kubectl exec -i -n "$ns" "$plant_pod" -c "$plant_container" -- \
+          env PYTHONDONTWRITEBYTECODE=1 python3 - state "$scripts" "$mark" | tail -1)" || state="{}"
+        store_pod=""
+        for running in $(kubectl get pods -n "$ns" -l "${local.pod_selector}" \
+            --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'); do
+          names="$(kubectl get pod -n "$ns" "$running" -o jsonpath='{.spec.containers[*].name}')"
+          if [[ " $names " == *" $teardown_container "* ]]; then store_pod="$running"; break; fi
+        done
+        if [ -z "$store_pod" ]; then
+          echo "ERROR: no running agent pod with a $teardown_container container; the planted run may stay in the store." >&2
+          return 1
+        fi
+        printf '%s' "$b64" | base64 -d | kubectl exec -i -n "$ns" "$store_pod" -c "$teardown_container" -- \
+          env PYTHONDONTWRITEBYTECODE=1 python3 - teardown-store "$scripts" "$mark" "$state"
+        printf '%s' "$b64" | base64 -d | kubectl exec -i -n "$ns" "$plant_pod" -c "$plant_container" -- \
+          env PYTHONDONTWRITEBYTECODE=1 python3 - teardown-scratch "$scripts" "$mark"
+      }
       on_exit() {
         status=$?
         trap '' TERM INT
@@ -112,7 +141,8 @@ resource "null_resource" "previous_scheduled_run" {
           echo "Apply failed (exit $status); undoing what it did." >&2
           arm clean "${local.home}" >&2 || echo "Could not clean the arm state; the next apply removes it first." >&2
           if [ -n "$planted" ]; then
-            plant_store teardown "${local.scripts_dir}" "${var.mark}" >&2 \
+            teardown_all "${var.agent_namespace}" "$pod" "$container" "${local.scripts_dir}" "${var.mark}" \
+              '${local.plant_b64}' "${local.teardown_container}" >&2 \
               || echo "Teardown failed too; the next apply's plant overwrites the mark and its destroy removes it." >&2
           fi
         fi
@@ -194,14 +224,36 @@ resource "null_resource" "previous_scheduled_run" {
           ${self.triggers.python} - clean "${self.triggers.home}" \
         || echo "WARNING: could not clean the arm state; the next apply removes it first." >&2
 
+      # Undo the plant: read its state where the scratch is, remove the store's
+      # envelopes where the store's files are, then the scratch files.
+      teardown_all() {
+        local ns="$1" plant_pod="$2" plant_container="$3" scripts="$4" mark="$5" b64="$6" teardown_container="$7"
+        local state store_pod running names
+        state="$(printf '%s' "$b64" | base64 -d | kubectl exec -i -n "$ns" "$plant_pod" -c "$plant_container" -- \
+          env PYTHONDONTWRITEBYTECODE=1 python3 - state "$scripts" "$mark" | tail -1)" || state="{}"
+        store_pod=""
+        for running in $(kubectl get pods -n "$ns" -l "${self.triggers.pod_selector}" \
+            --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'); do
+          names="$(kubectl get pod -n "$ns" "$running" -o jsonpath='{.spec.containers[*].name}')"
+          if [[ " $names " == *" $teardown_container "* ]]; then store_pod="$running"; break; fi
+        done
+        if [ -z "$store_pod" ]; then
+          echo "ERROR: no running agent pod with a $teardown_container container; the planted run may stay in the store." >&2
+          return 1
+        fi
+        printf '%s' "$b64" | base64 -d | kubectl exec -i -n "$ns" "$store_pod" -c "$teardown_container" -- \
+          env PYTHONDONTWRITEBYTECODE=1 python3 - teardown-store "$scripts" "$mark" "$state"
+        printf '%s' "$b64" | base64 -d | kubectl exec -i -n "$ns" "$plant_pod" -c "$plant_container" -- \
+          env PYTHONDONTWRITEBYTECODE=1 python3 - teardown-scratch "$scripts" "$mark"
+      }
+
       for container in ${self.triggers.store_containers}; do
         for pod in $(kubectl get pods -n "${self.triggers.namespace}" -l "${self.triggers.pod_selector}" \
             --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'); do
           names="$(kubectl get pod -n "${self.triggers.namespace}" "$pod" -o jsonpath='{.spec.containers[*].name}')"
           if [[ " $names " == *" $container "* ]]; then
-            printf '%s' '${self.triggers.plant_b64}' | base64 -d | \
-              kubectl exec -i -n "${self.triggers.namespace}" "$pod" -c "$container" -- \
-                env PYTHONDONTWRITEBYTECODE=1 python3 - teardown "${self.triggers.scripts_dir}" "${self.triggers.mark}"
+            teardown_all "${self.triggers.namespace}" "$pod" "$container" "${self.triggers.scripts_dir}" "${self.triggers.mark}" \
+              '${self.triggers.plant_b64}' "${self.triggers.teardown_container}"
             exit 0
           fi
         done
