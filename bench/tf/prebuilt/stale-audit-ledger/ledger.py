@@ -80,6 +80,10 @@ SEEDED_FROM_LEDGER_KEY = "seeded_from_ledger"
 # The file in the stream's report store directory that holds the number of the
 # issue the seed opened. audit_report reads only latest.json and runs/ there.
 SEEDED_ISSUE_FILE = "eval-stale-ledger-issue.json"
+# Where the seeded issue's number is kept for the teardown: the sandbox's scratch,
+# not the report store, which with the broker store on (#6110) is the broker's,
+# not a directory in this pod.
+BENCH_SCRATCH = "/opt/data/scratch/bench-ledgers"
 SEEDED_ISSUE_KEY = "issue_number"
 
 
@@ -179,8 +183,8 @@ def seed(audit_report, audit_id, repo, now, gap=False):
     url = str(opened.get("url") or "")
     if not isinstance(number, int):
         sys.exit(f"ERROR: the forge opened no issue for {audit_id} in {repo}: {opened}")
-    # Teardown does not create the directory: a store directory that holds
-    # no run is not the same to `finish` as no directory.
+    # In the sandbox's scratch, never the report store: a store directory that
+    # holds no run is not the same to `finish` as no directory.
     path = seeded_issue_path(audit_report, audit_id, repo)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({SEEDED_ISSUE_KEY: number}), encoding="utf-8")
@@ -218,9 +222,10 @@ def seed(audit_report, audit_id, repo, now, gap=False):
     # `write_report` never fails the run, and `previous_run_memory` seeds a
     # memory from the ledger when the store has no directory. So check that
     # the file is there and that the memory is the one written here.
-    latest = audit_report.reports_dir_for(audit_id, repo) / audit_report.REPORT_LATEST_NAME
+    # Asked of the store the run uses (report_store_dir): the broker's when it is on (#6110).
+    stored = audit_report.report_store_dir(audit_id, repo).has(audit_report.REPORT_LATEST_NAME)
     memory = audit_report.previous_run_memory(audit_id, number, repo, rendered.body)
-    if not latest.is_file() or memory is None or memory.get(SEEDED_FROM_LEDGER_KEY):
+    if not stored or memory is None or memory.get(SEEDED_FROM_LEDGER_KEY):
         sys.exit(
             f"ERROR: the stored record of #{number} was not written or is not one that "
             "finish trusts, so the run would hold the ledger open over a lost memory "
@@ -230,8 +235,8 @@ def seed(audit_report, audit_id, repo, now, gap=False):
 
 
 def seeded_issue_path(audit_report, audit_id, repo):
-    """The file that holds the number of the issue the seed opened."""
-    return audit_report.reports_dir_for(audit_id, repo) / SEEDED_ISSUE_FILE
+    """The file that holds the number of the issue the seed opened (BENCH_SCRATCH)."""
+    return Path(BENCH_SCRATCH) / audit_id / repo.lower().replace("/", "%2F") / SEEDED_ISSUE_FILE
 
 
 def seeded_issue(path):

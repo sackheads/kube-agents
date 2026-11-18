@@ -71,6 +71,8 @@ class Forge:
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     monkeypatch.setenv("FLEET_AUDIT_REPORTS_DIR", str(tmp_path / "reports"))
+    # The seeded issue's number is kept in the sandbox's scratch, not the store (#6110).
+    monkeypatch.setattr(ledger, "BENCH_SCRATCH", str(tmp_path / "scratch"))
     return tmp_path / "reports"
 
 
