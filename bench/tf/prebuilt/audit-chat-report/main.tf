@@ -17,8 +17,13 @@
 # the verifier can read what the channel got.
 #
 # The run must not be silent, or nothing reaches the channel to grade. Before it
-# fires, the stack renames the stream's `latest.json` in the report store on the
-# shell sandbox (to `latest.json.bench-moved`): with no trusted memory of the
+# fires, the stack renames the stream's `latest.json` in the report store (to
+# `latest.json.bench-moved`). The store is the broker's (#6110): the shell's
+# scripts reach it through the credential broker, and its files are under the
+# same root on the gateway pod's data volume, so store.sh runs in the agent
+# container. Before the rename, seed.py copies the sandbox's local copy of the
+# stream into the broker store, which the scripts would otherwise do on their
+# first touch and so bring the renamed `latest.json` back: with no trusted memory of the
 # previous run, `finish` answers `silent_ok: false` whatever the fleet holds
 # (fleet-audit SKILL.md, "lost memory"). A run that reaches `finish` writes a new
 # `latest.json`, the store's record from then on, and the renamed copy is
@@ -55,6 +60,7 @@ locals {
   python    = "/opt/hermes/.venv/bin/python3"
   arm_b64   = base64encode(file("${path.module}/arm.py"))
   store_b64 = base64encode(file("${path.module}/store.sh"))
+  seed_b64  = base64encode(file("${path.module}/seed.py"))
   # audit_report.py: REPORTS_DIR.
   store    = "/opt/data/fleet-audit/reports/${var.audit_job}"
   pod_wait = 5
@@ -123,14 +129,21 @@ resource "null_resource" "audit_chat_report" {
       }
       store() {
         printf '%s' '${local.store_b64}' | base64 -d | \
-          kubectl exec -i -n "${var.agent_namespace}" "${var.sandbox_pod}" -c "${var.sandbox_container}" -- \
+          kubectl exec -i -n "${var.agent_namespace}" "deployment/${var.agent_deployment}" \
+            -c "${var.agent_container}" --pod-running-timeout=${local.pod_wait}s -- \
             sh -s "$1" "${local.store}"
+      }
+      seed() {
+        printf '%s' '${local.seed_b64}' | base64 -d | \
+          kubectl exec -i -n "${var.agent_namespace}" "${var.sandbox_pod}" -c "${var.sandbox_container}" -- \
+            python3 - "${var.audit_job}" "${local.store}"
       }
 
       arm clean "${local.home}"
 
       arm idle "${local.home}" "${var.audit_job}" "${var.own_wait}"
 
+      seed
       moved=1
       store move
 
@@ -164,7 +177,8 @@ resource "null_resource" "audit_chat_report" {
           ${self.triggers.python} - clean "${self.triggers.home}" \
         || echo "WARNING: could not remove the state file; the next run removes it first." >&2
       printf '%s' '${self.triggers.store_b64}' | base64 -d \
-        | kubectl exec -i -n "${self.triggers.namespace}" "${self.triggers.sandbox_pod}" -c "${self.triggers.sandbox_container}" -- \
+        | kubectl exec -i -n "${self.triggers.namespace}" "deployment/${self.triggers.deployment}" \
+          -c "${self.triggers.container}" --pod-running-timeout=${self.triggers.pod_wait}s -- \
           sh -s restore "${self.triggers.store}" \
         || echo "WARNING: could not restore the renamed store files." >&2
     EOT

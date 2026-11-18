@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The report-store step of bench/tf/prebuilt/audit-chat-report, run in the shell
-# sandbox. Two commands, each taking the stream's store directory:
+# The report-store step of bench/tf/prebuilt/audit-chat-report, run in the agent
+# container, where the broker's report store is on the gateway pod's data volume
+# (#6110). Two commands, each taking the stream's store directory:
 #
 #   move <store>     rename every latest.json under it to latest.json.bench-moved
 #   restore <store>  put back each renamed copy whose latest.json the run did not

@@ -255,11 +255,26 @@ def test_an_envelope_with_no_issue_url_key_is_an_error(root):
     assert "no issue_url key" in result.reason
 
 
-def test_an_unreadable_store_pod_is_an_error(root, monkeypatch):
-    monkeypatch.setattr(onboarding, "sandbox_shell", _silent_shell)
+def test_an_unreadable_store_is_an_error(root, monkeypatch):
+    # The agent container gives the reader but not the store's document.
+    def reader_only(script: str, timeout: float) -> str:
+        return _local_shell(script, timeout) if report_store_reply.READER_READ in script else ""
+
+    monkeypatch.setattr(onboarding, "agent_shell", reader_only)
     result = _verify(f"compliance-audit: {URL_COMPLIANCE}", audits=(COMPLIANCE,))
     assert result.status == "error"
-    assert f"shell sandbox pod {onboarding.sandbox_pod()}" in result.reason
+    assert "report store in the agent container" in result.reason
+
+
+def test_the_store_is_read_in_the_agent_container_not_the_sandbox(root, monkeypatch):
+    # With the broker store on (#6110) the sandbox's local files are not the run's store.
+    def refuse(script: str, timeout: float) -> str:
+        raise AssertionError("the sandbox was read")
+
+    monkeypatch.setattr(onboarding, "sandbox_shell", refuse)
+    result = _verify("compliance-audit: never ran.\nfleet-wide-cost-analysis: never ran.")
+    assert result.status == "pass", result.reason
+    assert result.raw["read_in"] == "agent container"
 
 
 def test_an_absent_store_root_passes_on_mentions_and_the_record_says_so(root):
@@ -267,7 +282,7 @@ def test_an_absent_store_root_passes_on_mentions_and_the_record_says_so(root):
     assert result.status == "pass", result.reason
     assert result.raw["root_exists"] is False
     assert "nothing stored yet" in result.reason
-    assert result.raw["pod"] == onboarding.sandbox_pod()
+    assert result.raw["read_in"] == "agent container"
 
 
 def test_a_reader_the_agent_container_does_not_give_is_an_error(root, monkeypatch):
