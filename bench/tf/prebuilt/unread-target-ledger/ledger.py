@@ -55,6 +55,10 @@ from pathlib import Path
 # import (deploy/sandbox/smoke-test.sh imports audit_report the same way).
 SKILL_SCRIPTS = "/opt/data/skills/fleet-audit/scripts"
 PLATFORM_SCRIPTS = "/opt/data/scripts"
+# Where the seeded issue's number is kept for the teardown: the sandbox's scratch,
+# not the report store, which with the broker store on (#6110) is the broker's,
+# not a directory in this pod.
+BENCH_SCRATCH = "/opt/data/scratch/bench-ledgers"
 AUDIT_ID = "fleet-consistency-drift"
 # A cluster-level facet: the drift collector declares it not applicable on no
 # cluster whose cohort is under the floor, Standard or Autopilot.
@@ -179,24 +183,19 @@ def seed(audit_report, project, location, cluster, repo, now):
 
 
 def seeded_issue_path(audit_report, repo):
-    return audit_report.reports_dir_for(AUDIT_ID, repo) / SEEDED_ISSUE_NAME
+    return Path(BENCH_SCRATCH) / AUDIT_ID / repo.lower().replace("/", "%2F") / SEEDED_ISSUE_NAME
 
 
 def record_seeded_issue(audit_report, repo, number):
     """Write the seeded issue number where the teardown reads it.
 
-    Only into a directory that is there: the stored record makes it, and this
-    script does not make the report store. A number that is not written
-    leaves the teardown with the issue list alone, so the failure is a warning.
+    In the sandbox's scratch (BENCH_SCRATCH), never the report store. A
+    number that is not written leaves the teardown with the issue list alone,
+    so the failure is a warning.
     """
     path = seeded_issue_path(audit_report, repo)
-    if not path.parent.is_dir():
-        print(
-            f"WARNING: no report store directory {path.parent}; #{number} is not recorded.",
-            file=sys.stderr,
-        )
-        return
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps({"repo": repo, "number": number}) + "\n", encoding="utf-8"
         )
@@ -247,9 +246,10 @@ def store_record(audit_report, data, rendered, number, url, repo, now):
     # `write_report` never fails the run, and `previous_run_memory` seeds a
     # memory from the ledger when the store has no directory. So check that
     # the file is there and that the memory is the one written here.
-    latest = audit_report.reports_dir_for(AUDIT_ID, repo) / audit_report.REPORT_LATEST_NAME
+    # Asked of the store the run uses (report_store_dir): the broker's when it is on (#6110).
+    stored = audit_report.report_store_dir(AUDIT_ID, repo).has(audit_report.REPORT_LATEST_NAME)
     memory = audit_report.previous_run_memory(AUDIT_ID, number, repo, rendered.body)
-    return latest.is_file() and memory is not None and not memory.get(SEEDED_FROM_LEDGER_KEY)
+    return stored and memory is not None and not memory.get(SEEDED_FROM_LEDGER_KEY)
 
 
 def teardown(audit_report, repo):

@@ -77,6 +77,8 @@ class Forge:
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     monkeypatch.setenv("FLEET_AUDIT_REPORTS_DIR", str(tmp_path / "reports"))
+    # The seeded issue's number is kept in the sandbox's scratch, not the store (#6110).
+    monkeypatch.setattr(ledger, "BENCH_SCRATCH", str(tmp_path / "scratch"))
     return tmp_path / "reports"
 
 
@@ -311,11 +313,12 @@ def test_teardown_ignores_a_record_for_another_repository(store, monkeypatch):
 
 
 def test_the_seed_does_not_make_the_report_store_directory(store, monkeypatch):
-    """The stored record makes the directory; the record of the number does not."""
+    """The number goes to the sandbox's scratch (#6110); the report store is never made here."""
     assert not store.exists()
     ledger.record_seeded_issue(audit_report, GITOPS, 7)
     assert not store.exists()
-    assert ledger.recorded_seeded_issue(audit_report, GITOPS) is None
+    assert ledger.recorded_seeded_issue(audit_report, GITOPS) == 7
+    assert ledger.seeded_issue_path(audit_report, GITOPS).is_relative_to(ledger.BENCH_SCRATCH)
 
 
 def test_every_task_variable_is_declared_by_the_stack():
