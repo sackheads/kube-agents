@@ -14,9 +14,12 @@
 
 """Plant and remove the previous scheduled run of bench/tasks/fleet-audit-unchanged-manifest-skips-synthesis.
 
-main.tf runs this in the container that runs `audit_report.py finish`, as
-`python3 - <mode> <scripts dir> <mark> [<collector_args>...]`. That container
-holds the report store and the scratch directory on its own volume.
+main.tf runs this as `python3 - <mode> <scripts dir> <mark> [<args>...]`. `plant`,
+`state` and `teardown-scratch` run in the container that runs `audit_report.py
+finish`, which holds the scratch directory. The report store is the broker's
+when the shell sandbox writes through it (#6110), its files under the same root
+on the gateway pod's data volume, so `teardown-store` runs in the gateway's
+`platform-agent` container and takes the plant's state (`state`) as an argument.
 
 plant: runs the previous scheduled run of the fleet-consistency-drift stream
 the way a worker does, with no model: `start`, the drift collector with the
@@ -197,9 +200,9 @@ def stored_envelope(audit_report) -> tuple[dict | None, str]:
     except RuntimeError as exc:
         print(f"{AUDIT} resolves no repository: {exc}", file=sys.stderr)
         return None, audit_report.NO_FORGE_REPO
-    latest = audit_report.reports_dir_for(AUDIT, repo) / audit_report.REPORT_LATEST_NAME
+    # The store the run uses (report_store_dir): the broker's when it is on (#6110).
     try:
-        envelope = json.loads(latest.read_text(encoding="utf-8"))
+        envelope = json.loads(audit_report.report_store_dir(AUDIT, repo).read(audit_report.REPORT_LATEST_NAME))
     except (OSError, ValueError):
         return None, repo
     if not isinstance(envelope, dict) or audit_report.is_diverted(envelope):
@@ -340,14 +343,38 @@ def restore_store(directory: Path, audit_report) -> str:
     return "removed"
 
 
-def teardown(audit_report, mark: str) -> int:
-    """Remove the planted run and what it led to: any envelope with the mark, every envelope of the
-    planted repository stored at or after the planted run, and the scratch files; then put each
-    repository store touched back as it was (`restore_store`)."""
+def plant_state(audit_report) -> dict:
+    """The plant's recorded state (the planted run's repository and `finished_at`), or {}."""
     try:
         state = json.loads(plant_state_path(audit_report).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        state = {}
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def teardown(audit_report, mark: str) -> int:
+    """Both halves in one container: the store and the scratch on one volume (no shell sandbox)."""
+    teardown_store(audit_report, mark, plant_state(audit_report))
+    return teardown_scratch(audit_report)
+
+
+def teardown_scratch(audit_report) -> int:
+    """Remove the digest record, the planted manifest and the plant's state from the scratch."""
+    extra = 0
+    for path in (digest_record_path(audit_report), planted_manifest_path(audit_report), plant_state_path(audit_report)):
+        try:
+            path.unlink()
+            extra += 1
+        except FileNotFoundError:
+            continue
+    print(f"removed {extra} scratch file(s).")
+    return 0
+
+
+def teardown_store(audit_report, mark: str, state: dict) -> int:
+    """Remove the planted run and what it led to from the store: any envelope with the mark, and every
+    envelope of the planted repository stored at or after the planted run (from ``state``); then put
+    each repository store touched back as it was (`restore_store`). Run where the store's files are."""
     since = _parsed(state.get("finished_at"))
     repo_dir = None
     if state.get("repo") and since is not None:
@@ -364,18 +391,14 @@ def teardown(audit_report, mark: str) -> int:
             continue
         if mark in text or _stored_since(path.resolve(), repo_dir, since, text):
             path.unlink()
+            # A ring entry's writer sidecar goes with it, or the store answers a
+            # writer for an envelope that is not there.
+            path.with_suffix(".writer").unlink(missing_ok=True)
             removed += 1
             touched.add(_store_directory(path, audit_report))
     restored = [f"{directory.name}: {restore_store(directory, audit_report)}" for directory in sorted(touched)]
-    extra = 0
-    for path in (digest_record_path(audit_report), planted_manifest_path(audit_report), plant_state_path(audit_report)):
-        try:
-            path.unlink()
-            extra += 1
-        except FileNotFoundError:
-            continue
     print(
-        f"removed {removed} stored envelope(s) of the planted run and the runs closed from it, and {extra} scratch file(s)"
+        f"removed {removed} stored envelope(s) of the planted run and the runs closed from it"
         + (f"; store {', '.join(restored)}." if restored else ".")
     )
     return 0
@@ -383,7 +406,10 @@ def teardown(audit_report, mark: str) -> int:
 
 def main(argv: list[str]) -> int:
     if len(argv) < MIN_ARGC:
-        print("usage: python3 - plant|teardown <scripts dir> <mark> [collector args...]", file=sys.stderr)
+        print(
+            "usage: python3 - plant|teardown|state|teardown-store|teardown-scratch <scripts dir> <mark> [args...]",
+            file=sys.stderr,
+        )
         return 2
     mode, scripts, mark = argv[1:4]
     collector_args = [arg for arg in argv[4:] if arg]
@@ -393,6 +419,17 @@ def main(argv: list[str]) -> int:
         return plant(audit_report, mark, scripts, collector_args)
     if mode == "teardown":
         return teardown(audit_report, mark)
+    if mode == "state":
+        print(json.dumps(plant_state(audit_report)))
+        return 0
+    if mode == "teardown-store":
+        try:
+            state = json.loads(argv[4]) if len(argv) > 4 else {}
+        except ValueError:
+            state = {}
+        return teardown_store(audit_report, mark, state if isinstance(state, dict) else {})
+    if mode == "teardown-scratch":
+        return teardown_scratch(audit_report)
     print(f"unknown mode {mode!r}", file=sys.stderr)
     return 2
 
