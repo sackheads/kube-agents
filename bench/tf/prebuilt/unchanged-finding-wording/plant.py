@@ -135,14 +135,19 @@ def plant(audit_report, mark: str, scripts: str) -> int:
         rendered_ids=[f["id"] for f in findings],
     )
     audit_report.write_report(AUDIT, envelope, now)
-    stored = audit_report.reports_dir_for(AUDIT, repo) / audit_report.REPORT_LATEST_NAME
+    # Read back from the store the run uses (report_store_dir): the broker's when
+    # it is on (#6110), whose files are not in this container.
+    stored = audit_report.report_store_dir(AUDIT, repo)
     try:
-        text = stored.read_text(encoding="utf-8")
+        text = stored.read(audit_report.REPORT_LATEST_NAME)
     except FileNotFoundError:
         text = ""
     if mark not in text:
-        teardown(audit_report, mark)
-        print(f"the store at {stored} does not hold the planted run.", file=sys.stderr)
+        print(
+            f"the store at {stored} does not hold the planted run; the destroy step removes "
+            "anything it did write.",
+            file=sys.stderr,
+        )
         return 1
     print(f"planted {len(findings)} finding(s) for {AUDIT} in {repo}.")
     return 0
@@ -158,6 +163,9 @@ def teardown(audit_report, mark: str) -> int:
         try:
             if mark in path.read_text(encoding="utf-8"):
                 path.unlink()
+                # A ring entry's writer sidecar goes with it, or the store
+                # answers a writer for an envelope that is not there.
+                path.with_suffix(".writer").unlink(missing_ok=True)
                 removed += 1
         except FileNotFoundError:
             continue

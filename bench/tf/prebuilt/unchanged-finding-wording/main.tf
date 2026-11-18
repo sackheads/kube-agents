@@ -16,10 +16,12 @@
 # plant a previous run of the fleet-consistency-drift stream in the report store
 # of the install under test, and remove it again on destroy.
 #
-# plant.py runs in the container that runs `audit_report.py finish`, because the
-# store is on that container's volume: the shell sandbox's `shell` container when
-# the sandbox is on, else the gateway's `platform-agent` container. The same order
-# as `make fleet-audit-view` (scripts/fleet_audit_status_view.py).
+# plant.py plants in the container that runs `audit_report.py finish`: the shell
+# sandbox's `shell` container when the sandbox is on, else the gateway's
+# `platform-agent` container (the order of `make fleet-audit-view`). The shell
+# writes the store through the credential broker (#6110), whose files are under
+# the same root on the gateway pod's data volume, so the teardown, which removes
+# files, always runs in the gateway's `platform-agent` container.
 #
 # The planted run has the evidence and severity that `finish` gives each drift
 # candidate on the unchanged seeded fleet, and wording that starts with
@@ -39,23 +41,26 @@ terraform {
 locals {
   # Every pod the operator runs for an agent carries this label.
   pod_selector = "app.kubernetes.io/name=platform-agent"
-  # In this order: the sandbox first, then the gateway.
+  # Where the plant runs, in this order: the sandbox first, then the gateway.
   store_containers = "shell platform-agent"
-  scripts_dir      = "/opt/data/skills/fleet-audit/scripts"
-  script_b64       = base64encode(file("${path.module}/plant.py"))
+  # Where the store's files are: the gateway's data volume, whichever writes them.
+  teardown_container = "platform-agent"
+  scripts_dir        = "/opt/data/skills/fleet-audit/scripts"
+  script_b64         = base64encode(file("${path.module}/plant.py"))
 }
 
 resource "null_resource" "previous_run" {
   triggers = {
-    host_cluster     = var.host_cluster_name
-    host_location    = var.host_cluster_location
-    host_project     = var.project_id
-    namespace        = var.agent_namespace
-    mark             = var.mark
-    pod_selector     = local.pod_selector
-    store_containers = local.store_containers
-    scripts_dir      = local.scripts_dir
-    script_b64       = local.script_b64
+    host_cluster       = var.host_cluster_name
+    host_location      = var.host_cluster_location
+    host_project       = var.project_id
+    namespace          = var.agent_namespace
+    mark               = var.mark
+    pod_selector       = local.pod_selector
+    store_containers   = local.store_containers
+    teardown_container = local.teardown_container
+    scripts_dir        = local.scripts_dir
+    script_b64         = local.script_b64
   }
 
   provisioner "local-exec" {
@@ -71,13 +76,29 @@ resource "null_resource" "previous_run" {
           kubectl exec -i -n "${var.agent_namespace}" "$pod" -c "$container" -- \
             env PYTHONDONTWRITEBYTECODE=1 python3 - "$1" "${local.scripts_dir}" "${var.mark}"
       }
+      # The teardown removes files, so it runs where the store's files are: the
+      # gateway's data volume, in its platform-agent container (#6110).
+      teardown_store() {
+        local running names
+        for running in $(kubectl get pods -n "${var.agent_namespace}" -l "${local.pod_selector}" \
+            --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'); do
+          names="$(kubectl get pod -n "${var.agent_namespace}" "$running" -o jsonpath='{.spec.containers[*].name}')"
+          if [[ " $names " == *" ${local.teardown_container} "* ]]; then
+            printf '%s' '${local.script_b64}' | base64 -d | \
+              kubectl exec -i -n "${var.agent_namespace}" "$running" -c "${local.teardown_container}" -- \
+                env PYTHONDONTWRITEBYTECODE=1 python3 - teardown "${local.scripts_dir}" "${var.mark}"
+            return
+          fi
+        done
+        return 1
+      }
       on_exit() {
         status=$?
         trap '' TERM INT
         set +e
         if [ "$status" -ne 0 ] && [ -n "$planted" ]; then
           echo "Plant failed (exit $status); removing the envelopes it may have planted." >&2
-          plant_store teardown >&2 || echo "Teardown failed too; the next apply's plant overwrites the mark and its destroy removes it." >&2
+          teardown_store >&2 || echo "Teardown failed too; the next apply's plant overwrites the mark and its destroy removes it." >&2
         fi
         rm -rf "$kubeconfig_dir"
       }
@@ -135,7 +156,7 @@ resource "null_resource" "previous_run" {
       gcloud container clusters get-credentials "${self.triggers.host_cluster}" \
         --location "${self.triggers.host_location}" --project "$project" --quiet
 
-      for container in ${self.triggers.store_containers}; do
+      for container in ${self.triggers.teardown_container}; do
         for pod in $(kubectl get pods -n "${self.triggers.namespace}" -l "${self.triggers.pod_selector}" \
             --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'); do
           names="$(kubectl get pod -n "${self.triggers.namespace}" "$pod" -o jsonpath='{.spec.containers[*].name}')"
@@ -147,7 +168,7 @@ resource "null_resource" "previous_run" {
           fi
         done
       done
-      echo "ERROR: no running agent pod with a store container; the planted wording may stay in the store." >&2
+      echo "ERROR: no running agent pod with a ${self.triggers.teardown_container} container; the planted wording may stay in the store." >&2
       exit 1
     EOT
   }
