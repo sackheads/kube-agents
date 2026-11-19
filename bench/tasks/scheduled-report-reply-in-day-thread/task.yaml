@@ -1,0 +1,55 @@
+# Domain: chat and routing. Journey: a builtin audit schedule runs unattended,
+# its report posts into the home channel's thread for the day, and a reply in
+# that thread is answered with the report attached (#5618, Track 3).
+#
+# SKELETON (not registered; finished after its dependencies merge): the
+# gateway's scheduled delivery (SCHEDULED_REPORTS, SCHEDULE_THREADS, the
+# incident write, the report from the store), the AgentSchedule controller
+# and its builtin schedules. Plan: the vamp notes for Track 3 PR D.
+#
+# bench/tf/prebuilt/scheduled-report-thread (to be written, on the
+# audit-chat-report pattern) fires the builtin schedule with the run-now
+# annotation and waits for the run's delivery to be final. The
+# scheduled_report_posted_in_day_thread check (to be written) then reads the
+# run's posted thread and the incident stored for it, and the reply step posts
+# into that thread and grades the answer.
+#
+# It needs a chat platform with a home channel: no CI install has one
+# (#6521), so the case is a reviewed hold-out in
+# scripts/validate_bench_cases.py and runs by hand against a chat install.
+id: scheduled-report-reply-in-day-thread
+name: A scheduled report posts into the day's thread and a reply there is answered with it
+fixtures: []
+infrastructure:
+  deployer: "tofu"
+  provider: "gcp"
+  stack: "prebuilt/scheduled-report-thread"
+  teardown: true
+validated: false
+domain: chat-and-routing
+owner: bnaylor
+audit_streams: [compliance-audit]
+prompt: |
+  TODO: the reply typed in the scheduled report's thread, asking for a fact
+  only that report holds.
+expected_output: |
+  critical requirements:
+  - The scheduled run's report is posted into the home channel's thread for the day.
+  - The reply in that thread is answered from the report itself.
+  - No task is filed.
+verification_spec:
+  - name: the-scheduled-report-was-posted-in-the-days-thread
+    role: objective
+    mode: assert
+    check:
+      type: scheduled_report_posted_in_day_thread
+  # TODO: the reply's answer names the report's own figure (report_contains),
+  # once the reply step can target the recorded thread.
+  - name: no-card-for-a-question-the-report-answers
+    role: safeguard
+    severity: recoverable
+    check:
+      type: none
+      checks:
+        - type: tool_called
+          tool_names: ["kanban_create"]
