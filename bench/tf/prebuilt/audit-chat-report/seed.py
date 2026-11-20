@@ -23,14 +23,45 @@ seed after that would bring it back. So this reads each local stream once
 through the broker, which seeds it, and then requires the marker in every local
 stream directory before the stack goes on. A sandbox with no local store, or a
 file store selected (the broker store off), has nothing to seed.
+
+A read the broker does not answer (an OSError) is retried a few times with a
+short backoff and then fails the plant. It is never taken as seeded: the store's
+own `exists()` answers True for a store it cannot read, so the read here is one
+that raises instead (`ring()`).
 """
 
 import os
 import sys
+import time
 from pathlib import Path
 
 SKILL_SCRIPTS = "/opt/data/skills/fleet-audit/scripts"
 PLATFORM_SCRIPTS = "/opt/data/scripts"
+# The seed read's tries and the pause before the second, doubled before each
+# later one: 1s, 2s, 4s, so a broker that is restarting has about 7s to answer.
+SEED_READ_ATTEMPTS = 4
+SEED_READ_BACKOFF_SECONDS = 1.0
+
+
+class SeedReadFailed(Exception):
+    """The broker did not answer the seed read on any try."""
+
+
+def force_seed(audit_report, audit, repo, attempts=SEED_READ_ATTEMPTS, backoff=SEED_READ_BACKOFF_SECONDS, sleep=time.sleep):
+    """Read the stream once through the broker, which seeds it; retry an OSError.
+
+    A fresh store object per try, since one caches its reads. SeedReadFailed
+    after the last try, naming the last error.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            audit_report.report_store_dir(audit, repo).ring()
+            return
+        except OSError as exc:
+            print(f"seed: the broker read of {repo} failed (try {attempt} of {attempts}): {exc}", file=sys.stderr)
+            if attempt == attempts:
+                raise SeedReadFailed(f"{repo}: {exc}") from exc
+            sleep(backoff * 2 ** (attempt - 1))
 
 
 def main() -> int:
@@ -42,15 +73,27 @@ def main() -> int:
     if os.environ.get("FLEET_AUDIT_REPORT_STORE", "") != "broker" or not store.is_dir():
         print(f"seed: nothing to seed for {audit} (broker store off, or no local store)")
         return 0
-    missing = []
+    return seed_streams(audit_report, report_status, audit, store)
+
+
+def seed_streams(audit_report, report_status, audit, store, sleep=time.sleep):
+    """Seed every local stream under `store`, then require each one's marker. An exit status."""
+    unread, missing = [], []
     for owner in sorted(p for p in store.iterdir() if p.is_dir()):
         for stream in sorted(p for p in owner.iterdir() if p.is_dir()):
             repo = f"{owner.name}/{stream.name.replace('%2F', '/')}"
-            audit_report.report_store_dir(audit, repo).exists()
+            try:
+                force_seed(audit_report, audit, repo, sleep=sleep)
+            except SeedReadFailed as exc:
+                unread.append(str(exc))
+                continue
             if not (stream / report_status.SEED_MARKER_NAME).exists():
                 missing.append(repo)
+    if unread:
+        print(f"seed: the broker did not answer the seed read for {'; '.join(unread)}", file=sys.stderr)
     if missing:
         print(f"seed: no seed marker after a broker read for {', '.join(missing)}", file=sys.stderr)
+    if unread or missing:
         return 1
     print(f"seed: {audit}'s local streams are in the broker store")
     return 0
