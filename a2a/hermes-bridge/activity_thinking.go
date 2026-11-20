@@ -2580,11 +2580,19 @@ func isLineLeadingKVKey(s string, matchStart int) bool {
 // already redacted the first token of, with more after it: the marker, or
 // a scheme word and the marker, and then the value's other fields.
 func schemeTookValue(v string) bool {
-	if m := authSchemeCredentialPattern.FindStringSubmatchIndex(v); m != nil && m[0] == 0 {
+	// The match is anchored (authSchemeCredentialAtStart): the caller hands
+	// the rest of the document, and an unanchored match over it once per key
+	// made a long run of Authorization lines quadratic.
+	if m := authSchemeCredentialAtStart.FindStringSubmatchIndex(v); m != nil {
 		v = v[m[4]:]
 	}
 	return len(v) > len(redactedValue) && strings.HasPrefix(v, redactedValue)
 }
+
+// authSchemeCredentialAtStart is authSchemeCredentialPattern held to the
+// start of the text, the only place schemeTookValue looks, so a long value
+// with no scheme word fails at once rather than after a scan to its end.
+var authSchemeCredentialAtStart = regexp.MustCompile(`^` + authSchemeCredentialPattern.String())
 
 // inlineKVLaterKeyPattern is inlineKVSecretPattern without marks before the
 // separator. A later key that ends a value is looked for with it, so a

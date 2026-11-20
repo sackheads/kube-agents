@@ -895,3 +895,37 @@ func TestScrubInlineSecretsAMarkedAuthorizationKeyKeepsItsWholeValue(t *testing.
 		}
 	}
 }
+
+// A document of many Authorization lines whose values carry no scheme word
+// scrubs in time linear in its length: the marked-key check reads each value
+// on its own line, not the rest of the document (#6415 review). Doubling the
+// input must not roughly quadruple the time.
+func TestScrubInlineSecretsManyAuthorizationLinesStayLinear(t *testing.T) {
+	doc := func(n int) string {
+		var b strings.Builder
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&b, "Authorization: tok_%d_Synth3ticValue0001\n", i)
+		}
+		return b.String()
+	}
+	timeOf := func(s string) time.Duration {
+		best := time.Duration(1 << 62)
+		for range 3 {
+			start := time.Now()
+			scrubInlineSecrets(s)
+			best = min(best, time.Since(start))
+		}
+		return best
+	}
+	small, large := timeOf(doc(1000)), timeOf(doc(4000))
+	if large > 10*small+50*time.Millisecond {
+		t.Errorf("4000 lines took %v and 1000 took %v: quadrupling the input grew the time %.1fx, want close to 4x", large, small, float64(large)/float64(small))
+	}
+	// The same pairs on one line, as minified JSON or a joined log would
+	// carry them.
+	oneLine := func(n int) string { return strings.ReplaceAll(doc(n), "\n", " ") }
+	small, large = timeOf(oneLine(1000)), timeOf(oneLine(4000))
+	if large > 10*small+50*time.Millisecond {
+		t.Errorf("one line of 4000 pairs took %v and of 1000 took %v: %.1fx, want close to 4x", large, small, float64(large)/float64(small))
+	}
+}
