@@ -2,8 +2,8 @@
 
 The operator renders spec.harness.tuning.defaultRoute as A2A_DEFAULT_ADDRESSEE
 on the gateway and on this container from one resolver
-(resolveA2ADefaultRoute), and pins it in the managed .env, so the gateway and
-the producers here read the same value. A producer that moves its work to a
+(resolveA2ADefaultRoute), as a container env entry (a2aDefaultAddresseeEnv),
+so the gateway and the producers here read the same value. A producer that moves its work to a
 `cluster` profile task under the session route (#6528) asks routes_to_sessions()
 and keeps today's path otherwise.
 
