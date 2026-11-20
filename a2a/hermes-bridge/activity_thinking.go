@@ -2580,7 +2580,7 @@ func isLineLeadingKVKey(s string, matchStart int) bool {
 // already redacted the first token of, with more after it: the marker, or
 // a scheme word and the marker, and then the value's other fields.
 func schemeTookValue(v string) bool {
-	if m := authSchemeCredentialPattern.FindStringSubmatchIndex(v); m != nil && m[0] == 0 {
+	if m := zzAnchored.FindStringSubmatchIndex(v); m != nil {
 		v = v[m[4]:]
 	}
 	return len(v) > len(redactedValue) && strings.HasPrefix(v, redactedValue)
@@ -2841,3 +2841,5 @@ func workerSessionStartedBefore(sessionID string, startedAt time.Time) bool {
 	}
 	return ts.Before(startedAt.UTC().Add(-sessionTimestampClockSkew))
 }
+
+var zzAnchored = regexp.MustCompile(`^` + authSchemeCredentialPattern.String())
