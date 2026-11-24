@@ -16,8 +16,8 @@ import (
 	"time"
 )
 
-// fakeGateway records what reached it and answers each call with a short SSE
-// stream.
+// fakeGateway records what reached it and answers each call with a short
+// Gemini-format SSE stream whose last chunk finishes the answer.
 type fakeGateway struct {
 	mu    sync.Mutex
 	calls []recordedCall
@@ -36,7 +36,11 @@ func (g *fakeGateway) handler(w http.ResponseWriter, r *http.Request) {
 	g.mu.Unlock()
 	w.Header().Set("Content-Type", "text/event-stream")
 	for i := 1; i <= 3; i++ {
-		fmt.Fprintf(w, "data: {\"chunk\":%d}\n\n", i)
+		finish := ""
+		if i == 3 {
+			finish = `,"finishReason":"STOP"`
+		}
+		fmt.Fprintf(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"%d\"}]}%s}]}\n\n", i, finish)
 		w.(http.Flusher).Flush()
 	}
 }
@@ -60,7 +64,7 @@ func startProxyFor(t *testing.T, gateway string) *GatewayProxy {
 // TestTheGatewayProxyCarriesAModelCallAsItCame: a Gemini-format model call
 // reaches the gateway with its method, path, query and body unchanged, under
 // the gateway URL's own path, with no credential added, and its streamed
-// answer comes back chunk by chunk.
+// answer comes back whole, every chunk as it came.
 func TestTheGatewayProxyCarriesAModelCallAsItCame(t *testing.T) {
 	g := &fakeGateway{}
 	up := httptest.NewServer(http.HandlerFunc(g.handler))
@@ -182,6 +186,8 @@ func TestTheGatewayProxyBoundsWhatPassesThrough(t *testing.T) {
 		t.Errorf("the oversized request reached the gateway (%d calls)", len(calls))
 	}
 
+	// An answer over the cap is never passed on: the harness gets the
+	// retryable error instead, before any of it.
 	huge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		chunk := bytes.Repeat([]byte("y"), 1<<20)
 		for i := 0; i < gatewayProxyMaxResponseBytes>>20+4; i++ {
@@ -198,17 +204,15 @@ func TestTheGatewayProxyBoundsWhatPassesThrough(t *testing.T) {
 	}
 	n, _ := io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
-	if n > gatewayProxyMaxResponseBytes || n < gatewayProxyMaxResponseBytes-(1<<20) {
-		t.Errorf("the response passed %d bytes; want it cut off at the %d cap", n, gatewayProxyMaxResponseBytes)
+	if resp.StatusCode != gatewayProxyRetryStatus || n > 1<<10 {
+		t.Errorf("an answer over the cap: status %d, %d bytes passed; want %d and none of it", resp.StatusCode, n, gatewayProxyRetryStatus)
 	}
 
+	// An answer of exactly the cap passes whole.
+	head, tail := `{"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"`, `"}]}}]}`
+	exactBody := head + strings.Repeat("z", gatewayProxyMaxResponseBytes-len(head)-len(tail)) + tail
 	exact := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		chunk := bytes.Repeat([]byte("z"), 1<<20)
-		for i := 0; i < gatewayProxyMaxResponseBytes>>20; i++ {
-			if _, err := w.Write(chunk); err != nil {
-				return
-			}
-		}
+		_, _ = io.WriteString(w, exactBody)
 	}))
 	t.Cleanup(exact.Close)
 	ep := startProxyFor(t, exact.URL)
@@ -302,8 +306,8 @@ func TestAFailedGatewayCallLogsNoQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Errorf("status %d, want 502", resp.StatusCode)
+	if resp.StatusCode != gatewayProxyRetryStatus {
+		t.Errorf("status %d, want %d", resp.StatusCode, gatewayProxyRetryStatus)
 	}
 	if out := buf.String(); strings.Contains(out, "QUERYMARK") || strings.Contains(out, "BODYMARK") || !strings.Contains(out, "gateway proxy") {
 		t.Errorf("log %q: want the failure, without the query or body", out)
