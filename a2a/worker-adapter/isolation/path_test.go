@@ -40,7 +40,7 @@ func TestCheckSearchPath(t *testing.T) {
 		want string
 	}{
 		"a writable dir":                   {[]string{ro, rw}, "is writable"},
-		"a missing dir agy could create":   {[]string{rwParentMissing}, "could create it"},
+		"a missing dir agy could create":   {[]string{rwParentMissing}, "uid"},
 		"the working directory, empty":     {[]string{""}, "relative"},
 		"the working directory, relative":  {[]string{"bin"}, "relative"},
 		"an other-writable dir for others": {[]string{otherWritable(t)}, "is writable"},
@@ -63,4 +63,56 @@ func otherWritable(t *testing.T) string {
 	d := tempDir(t)
 	must(t, os.Chmod(d, 0o777))
 	return d
+}
+
+func TestCheckSearchPathChecksAncestorsLinksAndEntries(t *testing.T) {
+	// A read-only dir under a parent others can write: the parent can
+	// rename it away.
+	open := tempDir(t)
+	inner := filepath.Join(open, "bin")
+	must(t, os.Mkdir(inner, 0o555))
+	must(t, os.Chmod(open, 0o777))
+	if err := CheckSearchPath([]string{inner}, otherUID, otherGID); err == nil || !strings.Contains(err.Error(), "writable") {
+		t.Errorf("a writable ancestor: %v", err)
+	}
+
+	// A sticky, world-writable parent is fine for a child uid does not own.
+	sticky := tempDir(t)
+	child := filepath.Join(sticky, "bin")
+	must(t, os.Mkdir(child, 0o555))
+	must(t, os.Chmod(sticky, os.ModeSticky|0o777))
+	if err := CheckSearchPath([]string{child}, otherUID, otherGID); err != nil {
+		t.Errorf("a sticky parent over another user's dir: %v", err)
+	}
+	// ...but not where uid could create the missing entry.
+	if err := CheckSearchPath([]string{filepath.Join(sticky, "missing")}, otherUID, otherGID); err == nil {
+		t.Error("a missing entry in a sticky dir passed")
+	}
+
+	// Entries: a writable program, and a link to one.
+	bin := tempDir(t)
+	write(t, filepath.Join(bin, "kubectl"), "#!/bin/sh\n")
+	must(t, os.Chmod(filepath.Join(bin, "kubectl"), 0o757))
+	must(t, os.Chmod(bin, 0o555))
+	if err := CheckSearchPath([]string{bin}, otherUID, otherGID); err == nil || !strings.Contains(err.Error(), "kubectl") {
+		t.Errorf("a writable program inside: %v", err)
+	}
+	target := tempDir(t)
+	write(t, filepath.Join(target, "gcloud"), "#!/bin/sh\n")
+	must(t, os.Chmod(target, 0o777))
+	links := tempDir(t)
+	must(t, os.Symlink(filepath.Join(target, "gcloud"), filepath.Join(links, "gcloud")))
+	must(t, os.Chmod(links, 0o555))
+	if err := CheckSearchPath([]string{links}, otherUID, otherGID); err == nil || !strings.Contains(err.Error(), "links to") {
+		t.Errorf("a link into a writable dir: %v", err)
+	}
+
+	// A symlinked PATH entry is checked through its target.
+	realDir := tempDir(t)
+	must(t, os.Chmod(realDir, 0o777))
+	via := filepath.Join(tempDir(t), "via")
+	must(t, os.Symlink(realDir, via))
+	if err := CheckSearchPath([]string{via}, otherUID, otherGID); err == nil {
+		t.Error("a symlinked entry whose target is writable passed")
+	}
 }
