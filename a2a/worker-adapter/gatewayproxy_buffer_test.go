@@ -251,6 +251,14 @@ func TestTheProxyRefusesWhatThePolicyCantVouchFor(t *testing.T) {
 		{name: "name twice", body: `{"tools":[{"functionDeclarations":[{"name":"write_file","name":"read_file"}]}]}`},
 		{name: "declarations twice in an entry", body: `{"tools":[{"functionDeclarations":[{"name":"write_file"}],"functionDeclarations":[{"name":"read_file"}]}]}`},
 		{name: "tools in another case", body: `{"tools":[],"Tools":[{"functionDeclarations":[{"name":"write_file"}]}]}`},
+		{name: "tools only in another case", body: `{"Tools":[{"functionDeclarations":[{"name":"write_file"}]}]}`},
+		{name: "toolConfig in another case", body: `{"TOOL_CONFIG":{"function_calling_config":{"mode":"ANY"}}}`},
+		{name: "nested tools in another case", body: `{"generateContentRequest":{"TOOLS":[{"functionDeclarations":[{"name":"write_file"}]}]}}`},
+		// U+017F, the long s, folds to s under Unicode simple folding.
+		{name: "tools spelled with a long s", body: "{\"tool\u017f\":[{\"functionDeclarations\":[{\"name\":\"write_file\"}]}]}"},
+		{name: "tools twice, once with a long s", body: "{\"tools\":[],\"tool\u017f\":[]}"},
+		{name: "declaration key twice under unicode folding", body: "{\"tools\":[{\"functionDeclarations\":[{\"name\":\"read_file\",\"description\":\"a\",\"de\u017fcription\":\"b\"}]}]}"},
+
 		{name: "snake-case toolConfig", body: `{"tools":[],"tool_config":{"function_calling_config":{"mode":"ANY"}}}`},
 		{name: "snake-case nested request", body: `{"generate_content_request":{"tools":[{"functionDeclarations":[{"name":"new_tool"}]}]}}`},
 	} {

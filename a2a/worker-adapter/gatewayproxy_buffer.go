@@ -296,12 +296,23 @@ func applyToolPolicy(body []byte, policy ToolPolicy) ([]byte, offeredTools, erro
 	// JSON name, so both spellings are refused or rewritten. Keys that
 	// differ only in case are refused first (strictKeys), so no reader can
 	// take a different copy from this one.
-	if _, err := strictKeys(body); err != nil {
+	top, err := strictKeys(body)
+	if err != nil {
 		return nil, nil, err
+	}
+	// A key that folds to a policy field but isn't one of its exact
+	// spellings ("Tools", "TOOL_CONFIG", one with a Kelvin sign) is refused:
+	// this check reads exact keys, and a lenient reader downstream might not.
+	for k := range top {
+		norm := strings.ReplaceAll(k, "_", "")
+		for _, field := range []string{"tools", "toolConfig", "generateContentRequest"} {
+			if strings.EqualFold(norm, field) && !policyFieldSpellings[k] {
+				return nil, nil, fmt.Errorf("%w: %s is not a spelling this proxy checks", errToolPolicy, quoteShort(k))
+			}
+		}
 	}
 	out := body
 	for _, key := range []string{"toolConfig", "tool_config"} {
-		var err error
 		out, err = rewriteObjectValue(out, key, func([]byte) ([]byte, error) {
 			return nil, fmt.Errorf("%w: a toolConfig", errToolPolicy)
 		})
@@ -309,7 +320,6 @@ func applyToolPolicy(body []byte, policy ToolPolicy) ([]byte, offeredTools, erro
 			return nil, nil, err
 		}
 	}
-	var err error
 	out, err = rewriteObjectValue(out, "tools", func(raw []byte) ([]byte, error) { return filterTools(raw, policy, offered) })
 	if err != nil {
 		return nil, nil, err
@@ -329,6 +339,13 @@ func applyToolPolicy(body []byte, policy ToolPolicy) ([]byte, offeredTools, erro
 	return out, offered, nil
 }
 
+// policyFieldSpellings are the exact keys applyToolPolicy reads: the JSON
+// name and the proto name of each field it checks.
+var policyFieldSpellings = map[string]bool{
+	"tools": true, "toolConfig": true, "tool_config": true,
+	"generateContentRequest": true, "generate_content_request": true,
+}
+
 // strictKeys returns a JSON object's top-level keys, and refuses one where
 // two keys are equal ignoring case: Go's struct decoding folds case and
 // keeps the last copy, the gateway's parser may keep the first, and a tool
@@ -339,7 +356,7 @@ func strictKeys(obj []byte) (map[string]json.RawMessage, error) {
 		return nil, fmt.Errorf("%w: not a JSON object", errToolPolicy)
 	}
 	fields := map[string]json.RawMessage{}
-	folded := map[string]bool{}
+	var seen []string
 	for dec.More() {
 		tok, err := dec.Token()
 		if err != nil {
@@ -350,10 +367,14 @@ func strictKeys(obj []byte) (map[string]json.RawMessage, error) {
 		if err := dec.Decode(&raw); err != nil {
 			return nil, fmt.Errorf("%w: %v", errToolPolicy, err)
 		}
-		if folded[strings.ToLower(key)] {
-			return nil, fmt.Errorf("%w: %s appears twice", errToolPolicy, quoteShort(key))
+		// Unicode simple folding, as encoding/json and other lenient
+		// readers match keys, not only ASCII case.
+		for _, prior := range seen {
+			if strings.EqualFold(prior, key) {
+				return nil, fmt.Errorf("%w: %s appears twice", errToolPolicy, quoteShort(key))
+			}
 		}
-		folded[strings.ToLower(key)] = true
+		seen = append(seen, key)
 		fields[key] = raw
 	}
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
