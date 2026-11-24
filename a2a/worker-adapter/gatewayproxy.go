@@ -167,7 +167,7 @@ func StartGatewayProxyWith(gateway string, log *slog.Logger, opts GatewayProxyOp
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			var tooBig *http.MaxBytesError
 			if errors.As(err, &tooBig) {
-				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				writeGatewayError(w, gatewayProxyRefusedStatus, gatewayProxyTooLargeMessage)
 				return
 			}
 			// The path names the model and nothing else. The transport's
@@ -179,6 +179,7 @@ func StartGatewayProxyWith(gateway string, log *slog.Logger, opts GatewayProxyOp
 		},
 		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
+	held := make(chan struct{}, gatewayProxyMaxHeldCalls)
 	mux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Only origin-form requests for this listener: an absolute-form
 		// request (`GET http://elsewhere/...`) or another Host is someone
@@ -201,7 +202,7 @@ func StartGatewayProxyWith(gateway string, log *slog.Logger, opts GatewayProxyOp
 			return
 		}
 		if r.ContentLength > gatewayProxyMaxRequestBytes {
-			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+			writeGatewayError(w, gatewayProxyRefusedStatus, gatewayProxyTooLargeMessage)
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, gatewayProxyMaxRequestBytes)
@@ -210,6 +211,14 @@ func StartGatewayProxyWith(gateway string, log *slog.Logger, opts GatewayProxyOp
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), gatewayProxyCallTimeout)
 		defer cancel()
+		// At most gatewayProxyMaxHeldCalls answers are held at once.
+		select {
+		case held <- struct{}{}:
+			defer func() { <-held }()
+		case <-ctx.Done():
+			writeGatewayError(w, gatewayProxyRetryStatus, "gateway proxy: too many calls in flight")
+			return
+		}
 		rp.ServeHTTP(w, r.WithContext(ctx))
 	})
 	srv := &http.Server{

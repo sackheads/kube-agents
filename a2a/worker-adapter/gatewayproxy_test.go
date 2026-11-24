@@ -179,8 +179,9 @@ func TestTheGatewayProxyBoundsWhatPassesThrough(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Errorf("an oversized request got %d, want 413", resp.StatusCode)
+	// 403, not 413: agy reads a 413 as an empty successful turn.
+	if resp.StatusCode != gatewayProxyRefusedStatus {
+		t.Errorf("an oversized request got %d, want %d", resp.StatusCode, gatewayProxyRefusedStatus)
 	}
 	if calls := g.seen(); len(calls) != 0 {
 		t.Errorf("the oversized request reached the gateway (%d calls)", len(calls))
@@ -243,8 +244,8 @@ func TestTheGatewayProxyBoundsWhatPassesThrough(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Errorf("an oversized chunked request got %d, want 413", resp.StatusCode)
+	if resp.StatusCode != gatewayProxyRefusedStatus {
+		t.Errorf("an oversized chunked request got %d, want %d", resp.StatusCode, gatewayProxyRefusedStatus)
 	}
 }
 

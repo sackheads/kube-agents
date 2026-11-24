@@ -33,6 +33,13 @@ import (
 const (
 	gatewayProxyRefusedStatus = http.StatusForbidden
 	gatewayProxyRetryStatus   = http.StatusServiceUnavailable
+	// A request over the size cap is refused with the 403, not a 413, which
+	// agy would read as an empty successful turn.
+	gatewayProxyTooLargeMessage = "gateway proxy: the request is over the size limit"
+	// gatewayProxyMaxHeldCalls bounds how many answers the proxy holds at
+	// once, each up to gatewayProxyMaxResponseBytes. agy makes one call at a
+	// time, and its subagents a few more.
+	gatewayProxyMaxHeldCalls = 4
 )
 
 // ToolPolicy is the tool allowlist the proxy enforces on an agy worker's
@@ -130,14 +137,18 @@ func holdResponse(resp *http.Response, policy ToolPolicy) error {
 	}
 	countTokens := strings.HasSuffix(resp.Request.URL.Path, ":countTokens")
 	calls, err := answerCalls(body, resp.Header.Get("Content-Type"), countTokens)
-	if err != nil {
-		replaceResponse(resp, gatewayProxyRetryStatus, "gateway proxy: the model's answer was cut short or malformed")
+	switch {
+	case errors.Is(err, errAnswerBlocked):
+		replaceResponse(resp, gatewayProxyRefusedStatus, "gateway proxy: the model blocked the prompt")
+		return nil
+	case err != nil:
+		replaceResponse(resp, gatewayProxyRetryStatus, "gateway proxy: the model's answer was cut short, malformed or an error")
 		return nil
 	}
 	if offered, _ := resp.Request.Context().Value(offeredKey{}).(offeredTools); policy != nil && offered != nil {
 		for _, name := range calls {
 			if !offered[name] {
-				replaceResponse(resp, gatewayProxyRefusedStatus, fmt.Sprintf("gateway proxy: the model called %q, a tool this worker doesn't grant", name))
+				replaceResponse(resp, gatewayProxyRefusedStatus, fmt.Sprintf("gateway proxy: the model called %s, a tool this worker doesn't grant", quoteShort(name)))
 				return nil
 			}
 		}
@@ -147,6 +158,7 @@ func holdResponse(resp *http.Response, policy ToolPolicy) error {
 }
 
 // geminiAnswer is the part of a GenerateContentResponse the proxy reads.
+// Error is any error object the gateway put in the stream.
 type geminiAnswer struct {
 	Candidates []struct {
 		Content struct {
@@ -161,13 +173,24 @@ type geminiAnswer struct {
 	PromptFeedback *struct {
 		BlockReason string `json:"blockReason"`
 	} `json:"promptFeedback"`
+	Error json.RawMessage `json:"error"`
 }
 
-// answerCalls returns every functionCall name in an answer, and an error if
-// the answer is cut short or doesn't parse. A generation answer is whole
-// when some candidate carries a finishReason or the prompt was blocked; an
-// SSE answer also needs every event closed by a blank line. countTokens
-// answers carry neither, and need only parse.
+// Why answerCalls refuses an answer it parsed.
+var (
+	errAnswerCutShort = errors.New("cut short or malformed")
+	errAnswerBlocked  = errors.New("prompt blocked")
+)
+
+// answerCalls returns every functionCall name in an answer. It fails with
+// errAnswerCutShort when the answer is cut short, doesn't parse, or carries
+// an error (an error object in any chunk, or an SSE `event: error`), and
+// with errAnswerBlocked when the gateway's model blocked the prompt, which
+// agy would otherwise record as an empty successful turn. A generation
+// answer is whole when its last chunk carries a finishReason: a chunk after
+// the finish means the stream went on past its end. An SSE answer also
+// needs every event closed by a blank line. countTokens answers carry no
+// finishReason and need only parse.
 func answerCalls(body []byte, contentType string, countTokens bool) ([]string, error) {
 	var chunks [][]byte
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "text/event-stream") {
@@ -180,15 +203,19 @@ func answerCalls(body []byte, contentType string, countTokens bool) ([]string, e
 		chunks = [][]byte{body}
 	}
 	if len(chunks) == 0 {
-		return nil, errors.New("empty answer")
+		return nil, errAnswerCutShort
 	}
 	var calls []string
-	finished := countTokens
+	finished, blocked := false, false
 	for _, c := range chunks {
 		var a geminiAnswer
 		if err := json.Unmarshal(c, &a); err != nil {
-			return nil, err
+			return nil, errAnswerCutShort
 		}
+		if len(a.Error) > 0 && !bytes.Equal(a.Error, []byte("null")) {
+			return nil, errAnswerCutShort
+		}
+		finished = false
 		for _, cand := range a.Candidates {
 			for _, p := range cand.Content.Parts {
 				if p.FunctionCall != nil {
@@ -200,37 +227,60 @@ func answerCalls(body []byte, contentType string, countTokens bool) ([]string, e
 			}
 		}
 		if a.PromptFeedback != nil && a.PromptFeedback.BlockReason != "" {
-			finished = true
+			blocked = true
 		}
 	}
-	if !finished {
-		return nil, errors.New("no finishReason")
+	switch {
+	case blocked:
+		return nil, errAnswerBlocked
+	case !finished && !countTokens:
+		return nil, errAnswerCutShort
 	}
 	return calls, nil
 }
 
-// sseData returns the data of each event in an SSE body. Every event must
-// end with a blank line: one that doesn't was cut off.
+// sseData returns the data of each event in an SSE body, over the bytes
+// without copying the body. Every event must end with a blank line: one that
+// doesn't was cut off. An `event: error` fails the answer. A `data: [DONE]`
+// sentinel carries no chunk.
 func sseData(body []byte) ([][]byte, error) {
-	text := strings.ReplaceAll(string(body), "\r\n", "\n")
-	if strings.TrimSpace(text) == "" {
+	if len(bytes.TrimSpace(body)) == 0 {
 		return nil, nil
 	}
-	if !strings.HasSuffix(text, "\n\n") {
-		return nil, errors.New("last event not closed")
+	if !bytes.HasSuffix(body, []byte("\n\n")) && !bytes.HasSuffix(body, []byte("\r\n\r\n")) {
+		return nil, errAnswerCutShort
 	}
 	var out [][]byte
-	for _, event := range strings.Split(strings.TrimSuffix(text, "\n\n"), "\n\n") {
-		var data []string
-		for _, line := range strings.Split(event, "\n") {
-			if v, ok := strings.CutPrefix(line, "data:"); ok {
-				data = append(data, strings.TrimPrefix(v, " "))
-			}
-		}
+	var data [][]byte
+	flush := func() {
 		if len(data) > 0 {
-			out = append(out, []byte(strings.Join(data, "\n")))
+			out = append(out, bytes.Join(data, []byte("\n")))
+			data = nil
 		}
 	}
+	for len(body) > 0 {
+		line := body
+		if k := bytes.IndexByte(body, '\n'); k >= 0 {
+			line, body = body[:k], body[k+1:]
+		} else {
+			body = nil
+		}
+		line = bytes.TrimSuffix(line, []byte("\r"))
+		switch {
+		case len(line) == 0:
+			flush()
+		case bytes.HasPrefix(line, []byte("data:")):
+			v := bytes.TrimPrefix(bytes.TrimPrefix(line, []byte("data:")), []byte(" "))
+			if !bytes.Equal(bytes.TrimSpace(v), []byte("[DONE]")) {
+				data = append(data, v)
+			}
+		case bytes.HasPrefix(line, []byte("event:")):
+			if bytes.EqualFold(bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:"))), []byte("error")) {
+				return nil, errAnswerCutShort
+			}
+		}
+	}
+	flush()
 	return out, nil
 }
 
@@ -242,27 +292,83 @@ func sseData(body []byte) ([][]byte, error) {
 // gets the same treatment.
 func applyToolPolicy(body []byte, policy ToolPolicy) ([]byte, offeredTools, error) {
 	offered := offeredTools{}
-	out, err := rewriteObjectValue(body, "toolConfig", func([]byte) ([]byte, error) {
-		return nil, fmt.Errorf("%w: a toolConfig", errToolPolicy)
-	})
-	if err != nil {
+	// Google's JSON accepts a field's proto name (snake_case) as well as its
+	// JSON name, so both spellings are refused or rewritten. Keys that
+	// differ only in case are refused first (strictKeys), so no reader can
+	// take a different copy from this one.
+	if _, err := strictKeys(body); err != nil {
 		return nil, nil, err
 	}
+	out := body
+	for _, key := range []string{"toolConfig", "tool_config"} {
+		var err error
+		out, err = rewriteObjectValue(out, key, func([]byte) ([]byte, error) {
+			return nil, fmt.Errorf("%w: a toolConfig", errToolPolicy)
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	var err error
 	out, err = rewriteObjectValue(out, "tools", func(raw []byte) ([]byte, error) { return filterTools(raw, policy, offered) })
 	if err != nil {
 		return nil, nil, err
 	}
-	out, err = rewriteObjectValue(out, "generateContentRequest", func(raw []byte) ([]byte, error) {
-		inner, innerOffered, err := applyToolPolicy(raw, policy)
-		for name := range innerOffered {
-			offered[name] = true
+	for _, key := range []string{"generateContentRequest", "generate_content_request"} {
+		out, err = rewriteObjectValue(out, key, func(raw []byte) ([]byte, error) {
+			inner, innerOffered, err := applyToolPolicy(raw, policy)
+			for name := range innerOffered {
+				offered[name] = true
+			}
+			return inner, err
+		})
+		if err != nil {
+			return nil, nil, err
 		}
-		return inner, err
-	})
-	if err != nil {
-		return nil, nil, err
 	}
 	return out, offered, nil
+}
+
+// strictKeys returns a JSON object's top-level keys, and refuses one where
+// two keys are equal ignoring case: Go's struct decoding folds case and
+// keeps the last copy, the gateway's parser may keep the first, and a tool
+// policy can only vouch for a body every reader sees the same way.
+func strictKeys(obj []byte) (map[string]json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(obj))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, fmt.Errorf("%w: not a JSON object", errToolPolicy)
+	}
+	fields := map[string]json.RawMessage{}
+	folded := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", errToolPolicy, err)
+		}
+		key, _ := tok.(string)
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return nil, fmt.Errorf("%w: %v", errToolPolicy, err)
+		}
+		if folded[strings.ToLower(key)] {
+			return nil, fmt.Errorf("%w: %s appears twice", errToolPolicy, quoteShort(key))
+		}
+		folded[strings.ToLower(key)] = true
+		fields[key] = raw
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
+		return nil, fmt.Errorf("%w: not a JSON object", errToolPolicy)
+	}
+	return fields, nil
+}
+
+// quoteShort quotes a name from a request or answer for an error message
+// agy writes into the turn's result: escaped, and at most 64 bytes of it.
+func quoteShort(s string) string {
+	if len(s) > 64 {
+		s = s[:64] + "..."
+	}
+	return strconv.Quote(s)
 }
 
 // rewriteObjectValue replaces the value of key in the JSON object body with
@@ -288,7 +394,7 @@ func rewriteObjectValue(body []byte, key string, fn func([]byte) ([]byte, error)
 			continue
 		}
 		if start >= 0 {
-			return nil, fmt.Errorf("%w: %q appears twice", errToolPolicy, key)
+			return nil, fmt.Errorf("%w: %s appears twice", errToolPolicy, quoteShort(key))
 		}
 		end = int(dec.InputOffset())
 		start = end - len(raw)
@@ -324,13 +430,13 @@ func filterTools(raw []byte, policy ToolPolicy, offered offeredTools) ([]byte, e
 	}
 	kept := make([][]byte, 0, len(entries))
 	for _, entry := range entries {
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(entry, &fields); err != nil {
-			return nil, fmt.Errorf("%w: a tools entry is not an object", errToolPolicy)
+		fields, err := strictKeys(entry)
+		if err != nil {
+			return nil, err
 		}
 		for k := range fields {
 			if k != "functionDeclarations" {
-				return nil, fmt.Errorf("%w: a tools entry offers %q", errToolPolicy, k)
+				return nil, fmt.Errorf("%w: a tools entry offers %s", errToolPolicy, quoteShort(k))
 			}
 		}
 		var decls []json.RawMessage
@@ -339,18 +445,20 @@ func filterTools(raw []byte, policy ToolPolicy, offered offeredTools) ([]byte, e
 		}
 		var granted []json.RawMessage
 		for _, d := range decls {
-			var named struct {
-				Name string `json:"name"`
+			declFields, err := strictKeys(d)
+			if err != nil {
+				return nil, err
 			}
-			if err := json.Unmarshal(d, &named); err != nil || named.Name == "" {
+			var name string
+			if err := json.Unmarshal(declFields["name"], &name); err != nil || name == "" {
 				return nil, fmt.Errorf("%w: a declaration has no name", errToolPolicy)
 			}
-			if !policy.Known(named.Name) {
-				return nil, fmt.Errorf("%w: the harness offers %q, a tool it isn't known to have", errToolPolicy, named.Name)
+			if !policy.Known(name) {
+				return nil, fmt.Errorf("%w: the harness offers %s, a tool it isn't known to have", errToolPolicy, quoteShort(name))
 			}
-			if policy.Granted(named.Name) {
+			if policy.Granted(name) {
 				granted = append(granted, d)
-				offered[named.Name] = true
+				offered[name] = true
 			}
 		}
 		switch {
@@ -383,7 +491,7 @@ func holdRequest(w http.ResponseWriter, r *http.Request, policy ToolPolicy) *htt
 	if err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
-			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+			writeGatewayError(w, gatewayProxyRefusedStatus, gatewayProxyTooLargeMessage)
 			return nil
 		}
 		http.Error(w, "request body unreadable", http.StatusBadRequest)
@@ -397,6 +505,10 @@ func holdRequest(w http.ResponseWriter, r *http.Request, policy ToolPolicy) *htt
 			return nil
 		}
 	} else {
+		if len(body) > 0 {
+			writeGatewayError(w, gatewayProxyRefusedStatus, "gateway proxy: a GET with a body can't be checked")
+			return nil
+		}
 		offered = offeredTools{}
 	}
 	r = r.WithContext(context.WithValue(r.Context(), offeredKey{}, offered))

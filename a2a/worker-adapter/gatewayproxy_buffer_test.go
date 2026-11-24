@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fixedPolicy knows the names in known and grants those in granted.
@@ -134,7 +135,13 @@ func TestTheProxyMapsTheGatewaysFailuresToWhatAgyCanSee(t *testing.T) {
 		{name: "empty stream", ctype: "text/event-stream", body: "", want: 503},
 		{name: "JSON with no finishReason", ctype: "application/json", body: `{"candidates":[{"content":{"parts":[{"text":"GWMARK"}]}}]}`, method: "generateContent", want: 503},
 		{name: "finished stream", ctype: "text/event-stream", body: sseDone, want: 200},
-		{name: "blocked prompt", ctype: "application/json", body: `{"promptFeedback":{"blockReason":"SAFETY"}}`, method: "generateContent", want: 200},
+		{name: "blocked prompt", ctype: "application/json", body: `{"promptFeedback":{"blockReason":"SAFETY"},"x":"GWMARK"}`, method: "generateContent", want: 403},
+		{name: "finish then error event", ctype: "text/event-stream", body: sseDone + "data: {\"error\":{\"code\":500,\"message\":\"GWMARK\"}}\n\n", want: 503},
+		{name: "error beside a finish", ctype: "text/event-stream", body: "data: {\"candidates\":[{\"finishReason\":\"STOP\"}],\"error\":{\"message\":\"GWMARK\"}}\n\n", want: 503},
+		{name: "event: error", ctype: "text/event-stream", body: "event: error\ndata: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"GWMARK\"}]},\"finishReason\":\"STOP\"}]}\n\n", want: 503},
+		{name: "text after the finish", ctype: "text/event-stream", body: sseDone + "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"GWMARK\"}]}}]}\n\n", want: 503},
+		{name: "DONE sentinel after the finish", ctype: "text/event-stream", body: sseDone + "data: [DONE]\n\n", want: 200},
+		{name: "JSON error with a finish", ctype: "application/json", body: `{"candidates":[{"finishReason":"STOP"}],"error":{"message":"GWMARK"}}`, method: "generateContent", want: 503},
 		{name: "countTokens", ctype: "application/json", body: `{"totalTokens":7}`, method: "countTokens", want: 200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -240,6 +247,12 @@ func TestTheProxyRefusesWhatThePolicyCantVouchFor(t *testing.T) {
 		{name: "trailing data", body: `{"tools":[]} {"tools":[]}`},
 		{name: "nested countTokens request", body: `{"generateContentRequest":{"tools":[{"functionDeclarations":[{"name":"new_tool"}]}]}}`},
 		{name: "encoded body", body: `{}`, ctEnc: "gzip"},
+		{name: "name in another case", body: `{"tools":[{"functionDeclarations":[{"name":"run_command","NAME":"read_file"}]}]}`},
+		{name: "name twice", body: `{"tools":[{"functionDeclarations":[{"name":"write_file","name":"read_file"}]}]}`},
+		{name: "declarations twice in an entry", body: `{"tools":[{"functionDeclarations":[{"name":"write_file"}],"functionDeclarations":[{"name":"read_file"}]}]}`},
+		{name: "tools in another case", body: `{"tools":[],"Tools":[{"functionDeclarations":[{"name":"write_file"}]}]}`},
+		{name: "snake-case toolConfig", body: `{"tools":[],"tool_config":{"function_calling_config":{"mode":"ANY"}}}`},
+		{name: "snake-case nested request", body: `{"generate_content_request":{"tools":[{"functionDeclarations":[{"name":"new_tool"}]}]}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gw := &scriptedGateway{ctype: "text/event-stream", body: sseDone}
@@ -347,5 +360,83 @@ func TestTheHarnessGetsTheAnswerPlainWhenItAsksForGzip(t *testing.T) {
 	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 || string(b) != sseDone || resp.Header.Get("Content-Encoding") != "" {
 		t.Errorf("status %d encoding %q body %q, want 200 and the answer plain", resp.StatusCode, resp.Header.Get("Content-Encoding"), b)
+	}
+}
+
+// TestAGetWithABodyIsRefusedUnderAPolicy: a GET's body would go to the
+// gateway unchecked, so with a policy it is refused.
+func TestAGetWithABodyIsRefusedUnderAPolicy(t *testing.T) {
+	gw := &scriptedGateway{ctype: "text/event-stream", body: sseDone}
+	proxy := proxyWith(t, gw, policyOf(agyTools, "read_file"))
+	req, _ := http.NewRequest(http.MethodGet, proxy+"/v1beta/models/m:streamGenerateContent", strings.NewReader(`{"tools":[{"functionDeclarations":[{"name":"run_command"}]}]}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 403 || len(gw.seen()) != 0 {
+		t.Errorf("status %d, gateway calls %d; want 403 and none", resp.StatusCode, len(gw.seen()))
+	}
+}
+
+// TestRefusalsQuoteNamesShortAndEscaped: a name from the request or answer
+// reaches agy's result escaped and cut to 64 bytes.
+func TestRefusalsQuoteNamesShortAndEscaped(t *testing.T) {
+	long := strings.Repeat("a", 200) + "\n"
+	body := "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"" + strings.ReplaceAll(long, "\n", "\\n") + "\"}}]},\"finishReason\":\"STOP\"}]}\n\n"
+	proxy := proxyWith(t, &scriptedGateway{ctype: "text/event-stream", body: body}, policyOf(agyTools, "read_file"))
+	got := post(t, proxy, "streamGenerateContent", `{}`)
+	if got.status != 403 || strings.Contains(got.errMsg, strings.Repeat("a", 65)) || strings.Contains(got.errMsg, "\n") {
+		t.Errorf("status %d message %q, want 403 with the name cut and escaped", got.status, got.errMsg)
+	}
+}
+
+// TestTheProxyHoldsAtMostAFewAnswersAtOnce: calls past
+// gatewayProxyMaxHeldCalls wait for a slot rather than each holding an
+// answer.
+func TestTheProxyHoldsAtMostAFewAnswersAtOnce(t *testing.T) {
+	var mu sync.Mutex
+	inFlight, peak := 0, 0
+	release := make(chan struct{})
+	proxy := proxyWith(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		inFlight++
+		if inFlight > peak {
+			peak = inFlight
+		}
+		mu.Unlock()
+		<-release
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, sseDone)
+	}), nil)
+	var wg sync.WaitGroup
+	for i := 0; i < gatewayProxyMaxHeldCalls+3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := http.Post(proxy+"/v1beta/models/m:streamGenerateContent", "application/json", strings.NewReader("{}"))
+			if err == nil {
+				resp.Body.Close()
+			}
+		}()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := inFlight
+		mu.Unlock()
+		if n >= gatewayProxyMaxHeldCalls {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	if peak != gatewayProxyMaxHeldCalls {
+		t.Errorf("peak %d calls at the gateway at once, want %d", peak, gatewayProxyMaxHeldCalls)
 	}
 }
