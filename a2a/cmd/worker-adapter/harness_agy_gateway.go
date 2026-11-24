@@ -19,12 +19,16 @@ const (
 // agyWithheldEnv is what agyBuilder.env drops from the pod env.
 //
 //   - The gateway trio: agy's gateway is always the adapter's loopback proxy
-//     (startAgyGateway), so a pod or image value can't point agy past the
-//     proxy's path allowlist, its caps and the gateway's redaction. Loopback
-//     is plain http, so there is no CA cert either.
-//   - The model credentials and the direct gateway URL: the caller key lives
-//     in the adapter, never in agy's process env, so neither agy nor a shell
-//     the model runs can call the gateway directly and skip the proxy.
+//     (startAgyGateway), so a pod or image value can't take agy around the
+//     proxy's path allowlist and caps. (The proxy's own upstream is still the
+//     pod's ANTHROPIC_BASE_URL: the pod spec is trusted to name the gateway.)
+//     Loopback is plain http, so there is no CA cert either.
+//   - The model credentials and the direct gateway URL: a caller key lives in
+//     the adapter, never in agy's process env. While the gateway admits
+//     keyless callers this is tidiness, since a shell the model runs can
+//     still reach the gateway's well-known name without a key. Once #6706
+//     makes the key the gate, it is what keeps agy and its shell from calling
+//     the gateway around the proxy.
 var agyWithheldEnv = []string{
 	agyGatewayURLEnv, agyGatewayModelsEnv, agyGatewayCACertEnv,
 	modelAPIKeyEnv, modelAuthTokenEnv, modelBaseURLEnv,
@@ -68,4 +72,16 @@ func startAgyGateway(harness persona.Harness, env []string, getenv func(string) 
 		agyGatewayModelsEnv+"="+model,
 	)
 	return out, proxy, nil
+}
+
+// applyAgyGateway is run()'s step: startAgyGateway on cfg's harness and env,
+// with the result written back to cfg.HarnessEnv, which every turn's agy
+// process gets. The closer is nil for a harness other than agy.
+func applyAgyGateway(cfg *workeradapter.Config, getenv func(string) string, start gatewayProxyStarter, log *slog.Logger) (io.Closer, error) {
+	env, closer, err := startAgyGateway(cfg.Driver.Harness(), cfg.HarnessEnv, getenv, start, log)
+	if err != nil {
+		return nil, err
+	}
+	cfg.HarnessEnv = env
+	return closer, nil
 }

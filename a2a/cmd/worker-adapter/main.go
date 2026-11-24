@@ -194,12 +194,11 @@ func run() int {
 	// started once and closed when the worker exits (startAgyGateway). A
 	// proxy that can't start refuses the worker: agy never runs pointed at
 	// anything else.
-	env, gatewayProxy, err := startAgyGateway(cfg.Driver.Harness(), cfg.HarnessEnv, os.Getenv, workeradapter.StartGatewayProxy, log)
+	gatewayProxy, err := applyAgyGateway(&cfg, os.Getenv, workeradapter.StartGatewayProxy, log)
 	if err != nil {
 		log.Error("worker refused", "err", err)
 		return 1
 	}
-	cfg.HarnessEnv = env
 	if gatewayProxy != nil {
 		defer func() { _ = gatewayProxy.Close() }()
 	}

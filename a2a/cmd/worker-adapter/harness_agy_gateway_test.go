@@ -28,7 +28,7 @@ func TestFakeAgy(t *testing.T) {
 	if os.Getenv(fakeAgyEnv) != "1" {
 		t.Skip("helper for TestAnAgyWorkerCallsTheGatewayThroughOneProxy")
 	}
-	for _, key := range agyWithheldEnv[2:] {
+	for _, key := range []string{agyGatewayCACertEnv, modelAPIKeyEnv, modelAuthTokenEnv, modelBaseURLEnv} {
 		if _, set := os.LookupEnv(key); set {
 			fmt.Fprintf(os.Stderr, "agy's env has %s\n", key)
 			os.Exit(5)
@@ -74,10 +74,10 @@ func quietLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, n
 // TestAnAgyWorkerCallsTheGatewayThroughOneProxy: the pod points agy at
 // another gateway and carries a key; the env the adapter builds (builder,
 // then startAgyGateway) points agy at the loopback proxy, with the
-// adapter's model, and carries neither. Two agy processes in a row, as
-// #6710's per-turn respawn runs them on one env, both reach the install's
-// gateway through the one proxy, on /v1beta/..., with none of the pod's
-// credentials. A path off the proxy's allowlist is refused, and after Close
+// adapter's model, and carries neither. Two agy processes in a row on that
+// one env (what runTurn's respawn reuses), both reach the install's gateway
+// through the one proxy, on /v1beta/..., and the fake agy exits non-zero if
+// its env holds a key or a base URL. A path off the proxy's allowlist is refused, and after Close
 // the proxy is gone.
 func TestAnAgyWorkerCallsTheGatewayThroughOneProxy(t *testing.T) {
 	gw := &recordingGateway{}
@@ -148,9 +148,6 @@ func TestAnAgyWorkerCallsTheGatewayThroughOneProxy(t *testing.T) {
 	for _, r := range calls {
 		if r.URL.Path != "/v1beta/models/gemini-default:streamGenerateContent" {
 			t.Errorf("gateway path %q", r.URL.Path)
-		}
-		if a := r.Header.Get("Authorization"); strings.Contains(a, "sk-pod") {
-			t.Errorf("the pod's key reached the gateway from agy's side: %q", a)
 		}
 	}
 
@@ -257,4 +254,51 @@ func envCount(env []string, key string) int {
 		}
 	}
 	return n
+}
+
+// TestRunsConfigCarriesTheProxyToEveryTurn: the Config run() hands to
+// workeradapter.Run, built by configFromEnv (harnessEnv, agy's builder) and
+// then applyAgyGateway, carries the proxy's URL and the adapter's model in
+// HarnessEnv, and no pod key, base URL or gateway URL.
+func TestRunsConfigCarriesTheProxyToEveryTurn(t *testing.T) {
+	t.Setenv("TASK_ID", "task-1")
+	t.Setenv("PROFILE", "chat")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv(lib.EnvProfileWorker, "")
+	t.Setenv(lib.EnvHarness, "antigravity")
+	t.Setenv(lib.EnvHarnessUnisolated, lib.HarnessUnisolatedAllow)
+	t.Setenv("A2A_HARNESS_PATH", "/opt/agy/bin/agy")
+	t.Setenv(modelAPIKeyEnv, "sk-pod")
+	t.Setenv(modelBaseURLEnv, "http://inference-gateway.ns.svc")
+	t.Setenv(agyGatewayURLEnv, "http://elsewhere:1")
+	t.Setenv("A2A_MODEL", "gemini-default")
+	was := activeHarness
+	t.Cleanup(func() { activeHarness = was })
+	cfg, ok := configFromEnv(quietLog())
+	if !ok {
+		t.Fatal("configFromEnv refused the agy worker")
+	}
+	var gotGateway string
+	start := func(gateway string, log *slog.Logger) (*workeradapter.GatewayProxy, error) {
+		gotGateway = gateway
+		return &workeradapter.GatewayProxy{URL: "http://127.0.0.1:7"}, nil
+	}
+	closer, err := applyAgyGateway(&cfg, os.Getenv, start, quietLog())
+	if err != nil || closer == nil {
+		t.Fatalf("closer %v err %v", closer, err)
+	}
+	if gotGateway != "http://inference-gateway.ns.svc" {
+		t.Errorf("the proxy forwards to %q, want the pod's base URL", gotGateway)
+	}
+	if got := envValue(cfg.HarnessEnv, agyGatewayURLEnv); got != "http://127.0.0.1:7" || envCount(cfg.HarnessEnv, agyGatewayURLEnv) != 1 {
+		t.Errorf("%s=%q (x%d), want the proxy's URL once", agyGatewayURLEnv, got, envCount(cfg.HarnessEnv, agyGatewayURLEnv))
+	}
+	if got := envValue(cfg.HarnessEnv, agyGatewayModelsEnv); got != "gemini-default" {
+		t.Errorf("%s=%q", agyGatewayModelsEnv, got)
+	}
+	for _, key := range []string{modelAPIKeyEnv, modelBaseURLEnv, "NATS_URL"} {
+		if envCount(cfg.HarnessEnv, key) != 0 {
+			t.Errorf("the turn's env carries %s", key)
+		}
+	}
 }
