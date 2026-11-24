@@ -60,7 +60,7 @@ func (g *recordingGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.calls = append(g.calls, r.Clone(r.Context()))
 	g.mu.Unlock()
 	w.Header().Set("Content-Type", "text/event-stream")
-	_, _ = io.WriteString(w, "data: {\"candidates\":[]}\n\n")
+	_, _ = io.WriteString(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"pong\"}]},\"finishReason\":\"STOP\"}]}\n\n")
 }
 
 func (g *recordingGateway) seen() []*http.Request {
