@@ -35,10 +35,11 @@ import (
 //   - result.usage is cumulative over the process, so the decoder reports
 //     each result's difference from the last.
 //
-// Its MCP configuration (#6712), permissions (#6711), workspace and HOME
-// isolation (#6710) and model routing (#6714) are other sub-issues of
-// #6707; until they land the driver configures no MCP server and prepares
-// nothing before a turn.
+// Its MCP configuration (#6712), permissions (#6711) and workspace and HOME
+// isolation (#6710) are other sub-issues of #6707; until they land the
+// driver configures no MCP server and prepares nothing before a turn. Its
+// model calls go through the adapter's loopback gateway proxy, which
+// cmd/worker-adapter starts for an agy worker (#6714, startAgyGateway).
 type agyDriver struct{}
 
 var _ Driver = agyDriver{}
