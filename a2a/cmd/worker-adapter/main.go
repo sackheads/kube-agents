@@ -699,10 +699,12 @@ func selfPath() string {
 }
 
 // selectHarness picks the pod's harness: lib.EnvHarness, else on a profile
-// worker lib.EnvProfileHarness (its older name), else Claude Code. It returns
-// the harness's stream driver and argv builder. A value the worker doesn't
-// know is an error, never a fall back to Claude Code: a typo would otherwise
-// run the wrong harness without a word.
+// worker lib.EnvProfileHarness (its older name). It returns the harness's
+// stream driver and argv builder. Neither set is an error: the worker image
+// carries no harness until another is available, so the worker refuses to
+// start rather than run nothing (#6707). claude-code, the prototype harness
+// removed from the image, is refused too, as is a value the worker doesn't
+// know: a typo would otherwise run the wrong harness without a word.
 func selectHarness(getenv func(string) string) (persona.Harness, workeradapter.Driver, harnessBuilder, error) {
 	h := persona.Harness(getenv(lib.EnvHarness))
 	if h == "" && getenv(lib.EnvProfileWorker) == "true" {
@@ -743,8 +745,6 @@ func selectHarness(getenv func(string) string) (persona.Harness, workeradapter.D
 // argv and env under another harness's driver.
 func builderFor(h persona.Harness) (harnessBuilder, error) {
 	switch h {
-	case persona.ClaudeCode:
-		return claudeBuilder{}, nil
 	case persona.Antigravity:
 		return agyBuilder{}, nil
 	}
