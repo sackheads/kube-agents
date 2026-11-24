@@ -139,6 +139,7 @@ func walkChecked(p string, uid, gid int) (fs.FileInfo, error) {
 		if stickyAbove != "" && ownedBy(fi, uid) {
 			return nil, fmt.Errorf("%s is owned by uid %d in the sticky %s", next, uid, stickyAbove)
 		}
+		inSticky := stickyAbove // cur, if it is a sticky directory uid could write
 		stickyAbove = ""
 		if fi.Mode()&fs.ModeSymlink != 0 {
 			// A link's own bits mean nothing; cur, its directory, is checked.
@@ -151,6 +152,12 @@ func walkChecked(p string, uid, gid int) (fs.FileInfo, error) {
 			}
 			if filepath.IsAbs(target) {
 				cur = "/"
+			} else {
+				// A relative target resolves inside cur, the link's own
+				// directory: if that is the sticky directory, its rule holds
+				// for the target's first component too, and for a walk that
+				// ends there ("." or "").
+				stickyAbove = inSticky
 			}
 			queue = append(splitPath(target), queue...)
 			continue

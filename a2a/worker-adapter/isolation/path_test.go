@@ -164,3 +164,31 @@ func TestCheckSearchPathEndingOnAStickyDir(t *testing.T) {
 		t.Error("a link ending on the sticky dir passed")
 	}
 }
+
+// TestCheckSearchPathRelativeLinksInAStickyDir: a link inside a sticky
+// directory whose relative target stays in that directory keeps the
+// directory's rule: ending on it fails, a missing target fails, and a chain
+// ending on another user's entry passes.
+func TestCheckSearchPathRelativeLinksInAStickyDir(t *testing.T) {
+	sticky := tempDir(t)
+	child := filepath.Join(sticky, "child")
+	must(t, os.Mkdir(child, 0o555))
+	must(t, os.Symlink(".", filepath.Join(sticky, "dot")))
+	must(t, os.Symlink("l2", filepath.Join(sticky, "l1")))
+	must(t, os.Symlink("child", filepath.Join(sticky, "l2")))
+	must(t, os.Symlink("nothing", filepath.Join(sticky, "dangling")))
+	must(t, os.Chmod(sticky, os.ModeSticky|0o777))
+	for _, c := range []struct {
+		entry string
+		ok    bool
+	}{
+		{"dot", false},      // ends on the sticky dir itself
+		{"dangling", false}, // uid could create the target there
+		{"l1", true},        // l1 -> l2 -> child, none of them uid's
+	} {
+		err := CheckSearchPath([]string{filepath.Join(sticky, c.entry)}, otherUID, otherGID)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: err = %v, want ok=%v", c.entry, err, c.ok)
+		}
+	}
+}
