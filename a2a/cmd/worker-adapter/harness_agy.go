@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"time"
 )
 
@@ -11,8 +12,9 @@ import (
 // mapping here:
 //   - the tool allowlist and denylist, the delegate server and the system
 //     prompts (harnessSpec.tools and what goes with it): #6711 and #6712;
-//   - the model and the gateway (AGY_LLM_GATEWAY_*): #6714. The pod's
-//     values reach agy unchanged, and the builder adds none;
+//   - the model and the gateway: the adapter's loopback proxy
+//     (startAgyGateway, #6714) sets AGY_LLM_GATEWAY_*, and env drops any
+//     pod value;
 //   - HOME: a session pod's agy uses the pod's own HOME, shared by every
 //     turn of a reused pod, until #6710 gives each task its own and locks
 //     it. That is part of what the A2A_HARNESS_UNISOLATED waiver accepts;
@@ -64,9 +66,23 @@ func agyPrintTimeout(budget time.Duration) time.Duration {
 	return agyMinPrintTimeout
 }
 
-// env passes the pod environment through: none of Claude Code's model-key
-// placeholder or CLAUDE_CODE_* switches, which mean nothing to agy.
-func (agyBuilder) env(env []string, _ func(string) bool) []string { return env }
+// env is the pod environment less agyWithheldEnv: none of Claude Code's
+// model-key placeholder or CLAUDE_CODE_* switches, which mean nothing to
+// agy, no model credential and no gateway but the adapter's proxy.
+func (agyBuilder) env(env []string, _ func(string) bool) []string {
+	withheld := make(map[string]bool, len(agyWithheldEnv))
+	for _, key := range agyWithheldEnv {
+		withheld[key] = true
+	}
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if i := strings.Index(kv, "="); i > 0 && withheld[kv[:i]] {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
 
 // userSettings: none. agy's settings live under its HOME (see the type's
 // comment), which #6710 makes per task and resets.

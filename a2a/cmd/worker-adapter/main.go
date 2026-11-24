@@ -190,6 +190,20 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
+	// An agy worker's model calls go through the adapter's loopback proxy,
+	// started once and closed when the worker exits (startAgyGateway). A
+	// proxy that can't start refuses the worker: agy never runs pointed at
+	// anything else.
+	env, gatewayProxy, err := startAgyGateway(cfg.Driver.Harness(), cfg.HarnessEnv, os.Getenv, workeradapter.StartGatewayProxy, log)
+	if err != nil {
+		log.Error("worker refused", "err", err)
+		return 1
+	}
+	cfg.HarnessEnv = env
+	if gatewayProxy != nil {
+		defer func() { _ = gatewayProxy.Close() }()
+	}
+
 	if os.Getenv(lib.EnvProfileWorker) == "true" {
 		oneShot := os.Getenv(lib.EnvProfileWorkerOneShot)
 		// The harness configFromEnv selected: its driver names it.

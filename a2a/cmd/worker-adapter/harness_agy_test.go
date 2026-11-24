@@ -103,13 +103,27 @@ func TestTheTurnBudgetFollowsTheDeadlineVariables(t *testing.T) {
 	}
 }
 
-// TestAgysEnvIsThePodsOwn: the builder adds nothing to the pod environment,
-// and agy has no user settings file or default path here.
-func TestAgysEnvIsThePodsOwn(t *testing.T) {
-	base := []string{"HOME=/h", "AGY_LLM_GATEWAY_URL=http://127.0.0.1:1"}
-	got := agyBuilder{}.env(slices.Clone(base), func(string) bool { return false })
-	if !slices.Equal(got, base) {
-		t.Errorf("env %q, want the pod's own %q", got, base)
+// TestAgysEnvWithholdsTheGatewayAndTheKey: the builder adds nothing to the
+// pod environment and drops agy's gateway trio, the model credentials and
+// the direct gateway URL: the adapter's proxy sets the gateway
+// (startAgyGateway), and the key stays in the adapter. agy has no user
+// settings file or default path here.
+func TestAgysEnvWithholdsTheGatewayAndTheKey(t *testing.T) {
+	base := []string{
+		"HOME=/h",
+		"AGY_LLM_GATEWAY_URL=http://elsewhere:1",
+		"AGY_LLM_GATEWAY_MODELS=pod-model",
+		"AGY_LLM_GATEWAY_CA_CERT=/ca.pem",
+		"ANTHROPIC_API_KEY=sk-pod",
+		"ANTHROPIC_AUTH_TOKEN=tok",
+		"ANTHROPIC_BASE_URL=http://inference-gateway.ns.svc",
+		"A2A_MODEL=m",
+		"AGY_LLM_GATEWAY_URLX=kept",
+	}
+	got := agyBuilder{}.env(slices.Clone(base), func(string) bool { return true })
+	want := []string{"HOME=/h", "A2A_MODEL=m", "AGY_LLM_GATEWAY_URLX=kept"}
+	if !slices.Equal(got, want) {
+		t.Errorf("env %q, want %q", got, want)
 	}
 	if s := (agyBuilder{}).userSettings(func(string) string { return "/h" }); s != "" {
 		t.Errorf("userSettings %q, want none", s)
