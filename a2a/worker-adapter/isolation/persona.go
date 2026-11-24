@@ -63,21 +63,20 @@ func CheckPersonaDir(dir string, uid, gid int) error {
 	})
 }
 
-// writableBy reports whether the permission bits let uid (with primary
-// group gid) write fi. Root is not considered: the harness never runs as
-// root.
-func writableBy(fi fs.FileInfo, uid, gid int) bool {
+// writableBy reports whether uid could write fi, failing closed: an entry
+// uid owns is writable whatever its mode, since its owner can chmod it, and
+// so is any entry with a group or other write bit, since uid's supplementary
+// groups (an fsGroup among them) are not known here. gid is accepted for
+// callers' symmetry and not trusted to narrow the answer. Root is not
+// considered: the harness never runs as root. ACLs are not read; the image
+// and the pod spec set none.
+func writableBy(fi fs.FileInfo, uid, _ int) bool {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
 		return true // unknown ownership: fail closed
 	}
-	perm := fi.Mode().Perm()
-	switch {
-	case int(st.Uid) == uid:
-		return perm&0o200 != 0
-	case int(st.Gid) == gid:
-		return perm&0o020 != 0
-	default:
-		return perm&0o002 != 0
+	if int(st.Uid) == uid {
+		return true
 	}
+	return fi.Mode().Perm()&0o022 != 0
 }

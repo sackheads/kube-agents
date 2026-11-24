@@ -42,10 +42,6 @@ func TestCheckPersonaDirAcceptsAReadOnlyPersona(t *testing.T) {
 	if err := CheckPersonaDir(personaDir(t), otherUID, otherGID); err != nil {
 		t.Fatal(err)
 	}
-	// Owned by the checking user but with no write bit is still read-only.
-	if err := CheckPersonaDir(personaDir(t), os.Getuid(), os.Getgid()); err != nil {
-		t.Fatalf("owner without a write bit: %v", err)
-	}
 }
 
 func TestCheckPersonaDirFailsClosed(t *testing.T) {
@@ -54,13 +50,17 @@ func TestCheckPersonaDirFailsClosed(t *testing.T) {
 		uid, gid int
 		want     string
 	}{
-		"the dir writable by its owner, agy": {
-			mutate: func(t *testing.T, d string) { must(t, os.Chmod(d, 0o755)) },
+		// The owner can chmod, so an entry agy owns is writable even with
+		// no write bit set.
+		"the dir owned by agy, no write bits": {
+			mutate: func(t *testing.T, d string) {},
 			uid:    os.Getuid(), gid: os.Getgid(), want: "writable",
 		},
-		"the dir writable by agy's group": {
+		// agy's supplementary groups are unknown here, so any group write
+		// bit fails, whatever gid is passed.
+		"the dir group-writable": {
 			mutate: func(t *testing.T, d string) { must(t, os.Chmod(d, 0o575)) },
-			uid:    otherUID, gid: os.Getgid(), want: "writable",
+			uid:    otherUID, gid: otherGID, want: "writable",
 		},
 		"the dir writable by others": {
 			mutate: func(t *testing.T, d string) { must(t, os.Chmod(d, 0o557)) },
