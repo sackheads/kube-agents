@@ -108,14 +108,20 @@ func walkChecked(p string, uid, gid int) (fs.FileInfo, error) {
 	for len(queue) > 0 {
 		name := queue[0]
 		queue = queue[1:]
-		switch name {
-		case "", ".":
-			continue
-		case "..":
-			cur = filepath.Dir(cur) // cur is real, so this is the kernel's ".."
-			stickyAbove = ""
+		if name == ".." {
+			// cur is real, so its parent is the kernel's "..". The parent
+			// is checked again as if it were the next component: it may be
+			// where the walk ends.
+			cur = filepath.Dir(cur)
 			if last, err = os.Lstat(cur); err != nil {
 				return nil, err
+			}
+			stickyAbove = ""
+			if writableBy(last, uid, gid) {
+				if !last.IsDir() || last.Mode()&fs.ModeSticky == 0 || ownedBy(last, uid) {
+					return nil, fmt.Errorf("%s is writable by uid %d", cur, uid)
+				}
+				stickyAbove = cur
 			}
 			continue
 		}
@@ -150,19 +156,32 @@ func walkChecked(p string, uid, gid int) (fs.FileInfo, error) {
 			continue
 		}
 		if writableBy(fi, uid, gid) {
-			if fi.IsDir() && fi.Mode()&fs.ModeSticky != 0 && !ownedBy(fi, uid) && len(queue) > 0 {
-				stickyAbove = next
+			if fi.IsDir() && fi.Mode()&fs.ModeSticky != 0 && !ownedBy(fi, uid) {
+				stickyAbove = next // allowed only if a component follows (below)
 			} else {
 				return nil, fmt.Errorf("%s is writable by uid %d", next, uid)
 			}
 		}
 		cur, last = next, fi
 	}
+	if stickyAbove != "" {
+		// The walk ends on the sticky directory itself, which uid can write.
+		return nil, fmt.Errorf("%s is writable by uid %d", stickyAbove, uid)
+	}
 	return last, nil
 }
 
+// splitPath is p's components, without empty ones and ".": neither moves
+// the walk, and a queue holding them must not count as "a component
+// follows". ".." is kept; the walk resolves it against the real path.
 func splitPath(p string) []string {
-	return strings.Split(strings.Trim(p, "/"), "/")
+	var out []string
+	for _, c := range strings.Split(p, "/") {
+		if c != "" && c != "." {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // checkEntry checks one entry of a searched-first directory: the walk to

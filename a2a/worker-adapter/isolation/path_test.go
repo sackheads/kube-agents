@@ -140,3 +140,27 @@ func TestCheckSearchPathChecksEveryLinkHop(t *testing.T) {
 		t.Fatalf("an all read-only chain: %v", err)
 	}
 }
+
+// TestCheckSearchPathEndingOnAStickyDir: the sticky exemption holds only
+// for a directory something follows; a path that ends on one, however it
+// is spelled, fails.
+func TestCheckSearchPathEndingOnAStickyDir(t *testing.T) {
+	sticky := tempDir(t)
+	child := filepath.Join(sticky, "child")
+	must(t, os.Mkdir(child, 0o555))
+	must(t, os.Chmod(sticky, os.ModeSticky|0o777))
+	for _, p := range []string{sticky, sticky + "/", sticky + "/.", child + "/..", sticky + "/./"} {
+		if err := CheckSearchPath([]string{p}, otherUID, otherGID); err == nil || !strings.Contains(err.Error(), "writable") {
+			t.Errorf("%q: err = %v; want the sticky dir writable", p, err)
+		}
+	}
+	if err := CheckSearchPath([]string{child}, otherUID, otherGID); err != nil {
+		t.Errorf("the child under it: %v", err)
+	}
+	// A link that ends on the sticky dir fails the same way.
+	link := filepath.Join(tempDir(t), "l")
+	must(t, os.Symlink(sticky+"/.", link))
+	if err := CheckSearchPath([]string{link}, otherUID, otherGID); err == nil {
+		t.Error("a link ending on the sticky dir passed")
+	}
+}
