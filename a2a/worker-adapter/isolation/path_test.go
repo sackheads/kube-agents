@@ -39,7 +39,7 @@ func TestCheckSearchPath(t *testing.T) {
 		dirs []string
 		want string
 	}{
-		"a writable dir":                   {[]string{ro, rw}, "is writable"},
+		"a writable dir":                   {[]string{ro, rw}, "uid"},
 		"a missing dir agy could create":   {[]string{rwParentMissing}, "uid"},
 		"the working directory, empty":     {[]string{""}, "relative"},
 		"the working directory, relative":  {[]string{"bin"}, "relative"},
