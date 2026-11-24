@@ -103,7 +103,7 @@ func TestCheckSearchPathChecksAncestorsLinksAndEntries(t *testing.T) {
 	links := tempDir(t)
 	must(t, os.Symlink(filepath.Join(target, "gcloud"), filepath.Join(links, "gcloud")))
 	must(t, os.Chmod(links, 0o555))
-	if err := CheckSearchPath([]string{links}, otherUID, otherGID); err == nil || !strings.Contains(err.Error(), "links to") {
+	if err := CheckSearchPath([]string{links}, otherUID, otherGID); err == nil || !strings.Contains(err.Error(), "writable") {
 		t.Errorf("a link into a writable dir: %v", err)
 	}
 
@@ -114,5 +114,29 @@ func TestCheckSearchPathChecksAncestorsLinksAndEntries(t *testing.T) {
 	must(t, os.Symlink(realDir, via))
 	if err := CheckSearchPath([]string{via}, otherUID, otherGID); err == nil {
 		t.Error("a symlinked entry whose target is writable passed")
+	}
+}
+
+// TestCheckSearchPathChecksEveryLinkHop: a link whose first hop goes
+// through a writable directory fails even though the chain's final target
+// is safe, since that middle link can be retargeted.
+func TestCheckSearchPathChecksEveryLinkHop(t *testing.T) {
+	safe := tempDir(t)
+	write(t, filepath.Join(safe, "kubectl"), "#!/bin/sh\n")
+	must(t, os.Chmod(filepath.Join(safe, "kubectl"), 0o555))
+	must(t, os.Chmod(safe, 0o555))
+	middle := tempDir(t)
+	must(t, os.Symlink(filepath.Join(safe, "kubectl"), filepath.Join(middle, "hop")))
+	must(t, os.Chmod(middle, 0o777))
+	bin := tempDir(t)
+	must(t, os.Symlink(filepath.Join(middle, "hop"), filepath.Join(bin, "kubectl")))
+	must(t, os.Chmod(bin, 0o555))
+	if err := CheckSearchPath([]string{bin}, otherUID, otherGID); err == nil || !strings.Contains(err.Error(), middle) {
+		t.Fatalf("a hop through a writable dir: %v", err)
+	}
+	// The same chain with the middle directory locked passes.
+	must(t, os.Chmod(middle, 0o555))
+	if err := CheckSearchPath([]string{bin}, otherUID, otherGID); err != nil {
+		t.Fatalf("an all read-only chain: %v", err)
 	}
 }
