@@ -9958,9 +9958,10 @@ func a2aSessionHarnessSpec(agent *agentv1alpha1.PlatformAgent) string {
 }
 
 // a2aSessionHarnessSupported is whether the operator renders a session
-// harness: claude-code. Antigravity joins when its worker isolation lands.
+// harness: core-agent, the harness the worker image carries. claude-code is
+// no longer in the image.
 func a2aSessionHarnessSupported(t string) bool {
-	return t == agentv1alpha1.AgentProfileHarnessClaudeCode
+	return t == agentv1alpha1.AgentProfileHarnessCoreAgent
 }
 
 // a2aSessionHarness is the session harness the gateway is given: the
