@@ -100,6 +100,17 @@ type AgentProfileSpec struct {
 	// +optional
 	YieldToPinned bool `json:"yieldToPinned,omitempty"`
 
+	// Delegates lets this profile's tasks hand tasks on to other profiles.
+	// With it set, the profile's worker offers each task a delegate tool,
+	// and a task that delegates stays open until its children report back
+	// (or its deadline nears), then answers from their reports. A task that
+	// is itself a delegated child gets no tool. The gateway refuses a
+	// delegation from a task of a profile without it, and a child it starts
+	// is held to the gateway's delegation checks (tier, scope, chain, the
+	// target's allow-lists) whatever this says.
+	// +optional
+	Delegates bool `json:"delegates,omitempty"`
+
 	// Lifecycle bounds one task's wall clock and how long the finished Job
 	// lingers.
 	// +required

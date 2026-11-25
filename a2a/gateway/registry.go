@@ -575,6 +575,10 @@ type BatchEnd struct {
 	Stopped  bool           `json:"stopped,omitempty"`
 	Unposted bool           `json:"unposted,omitempty"`
 	Cards    bool           `json:"cards,omitempty"`
+	// Unsent marks a profile parent's batch child whose end couldn't be
+	// published to the parent: Text is kept, and the heal sends it again
+	// (healProfileBatch) and clears this.
+	Unsent bool `json:"unsent,omitempty"`
 }
 
 // fanOut reports a turn whose request was a batch of two or more children.
@@ -618,6 +622,27 @@ func (rec *SessionRecord) batchLeft(parent TaskRef) int {
 func (rec *SessionRecord) fanOutPending(taskID string) bool {
 	ref, ok := rec.TaskRefFor(taskID)
 	return ok && ref.fanOut() && ref.DelegationEnd == "" && rec.batchLeft(ref) > 0
+}
+
+// endedBatchEntries is the recorded end of each entry of taskID's batch whose
+// child has ended, read before a withdrawal drops those children from the
+// record: an end already sent gets nothing more, and an end recorded Unsent
+// is sent as recorded (endWithdrawnProfileBatch).
+func (rec *SessionRecord) endedBatchEntries(taskID string) map[int]TaskRef {
+	ended := map[int]TaskRef{}
+	for _, k := range rec.batchChildren(taskID) {
+		if k.BatchEnd != nil {
+			ended[k.BatchIndex] = k
+		}
+	}
+	return ended
+}
+
+// profileTask reports a task addressed to an AgentProfile, which waits open
+// for its children rather than being woken (it has a tier).
+func (rec *SessionRecord) profileTask(taskID string) bool {
+	ref, ok := rec.TaskRefFor(taskID)
+	return ok && ref.Tier != ""
 }
 
 // batchComplete reports a turn whose batch has every planned child on the

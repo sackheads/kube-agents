@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -19,6 +21,7 @@ import (
 
 	"github.com/gke-labs/kube-agents/a2a/capability"
 	"github.com/gke-labs/kube-agents/a2a/lib"
+	"github.com/gke-labs/kube-agents/a2a/lib/answerscrub"
 	"github.com/gke-labs/kube-agents/a2a/lib/askkind"
 	"github.com/gke-labs/kube-agents/a2a/lib/chatmsg"
 )
@@ -416,6 +419,10 @@ type adapter struct {
 	// delegateTargets part (delegateWidthOf); zero or one is the single
 	// shape only.
 	delegateWidth int
+	// delegateRounds is how many delegate calls a profile task may make, as
+	// the gateway advertised it on the submission's delegateTargets part
+	// (delegateRoundsOf); zero or one is one.
+	delegateRounds int
 
 	// dispatched is a task a profile worker took from the dispatcher
 	// (profile.go). The dispatcher checked the grant at admission
@@ -432,6 +439,19 @@ type adapter struct {
 	// and finalize sees it first, they all see it after.
 	abandonSeen   bool
 	abandonReason string
+
+	// seen is this task's set of secret values its tool results carried
+	// (answerscrub.Seen), fed from the driver's EventToolResult events (one
+	// per tool_result the harness reports) and redacted out of every
+	// model-written text the task publishes (scrub). The adapter is per
+	// task, so the set is too, and finalize clears and closes it.
+	seen answerscrub.Seen
+
+	// childCh carries a dispatched task's child ends from its .in
+	// (handleInMsg) to supervise, which waits on them once the task has
+	// delegated (childwait.go). Nil for every other task, whose .in drops
+	// them as it always has.
+	childCh chan childEnd
 }
 
 // errAbandoned is finalize's answer for an abandoned task: no terminal went
@@ -817,6 +837,9 @@ func (a *adapter) run(ctx context.Context, origin *lib.Envelope, originSeq uint6
 	// originSeq+1 means input published before this line still arrives.
 	steerCh := make(chan string, steerQueueDepth)
 	cancelCh := make(chan struct{}, 1)
+	if a.dispatched {
+		a.childCh = make(chan childEnd, childQueueDepth)
+	}
 	stopIn, err := a.consumeIn(ctx, originSeq+1, origin.EnvelopeID, steerCh, cancelCh)
 	if err != nil {
 		state := lib.StateFailed
@@ -880,6 +903,7 @@ func (a *adapter) run(ctx context.Context, origin *lib.Envelope, originSeq uint6
 		// keeps up with profiles added and removed.
 		argv, _ = withDelegateTargetsFor(drv, argv, origin)
 		a.delegateWidth = delegateWidthOf(origin)
+		a.delegateRounds = delegateRoundsOf(origin)
 	}
 
 	if cfg.SessionReuse {
@@ -966,6 +990,7 @@ func (a *adapter) dispatchedOr(check func(context.Context, *nats.Conn, *lib.Enve
 // result event buffered behind a fast exit must still win.
 func (a *adapter) supervise(ctx context.Context, proc *harnessProc, steerCh <-chan string, cancelCh <-chan struct{}, delegateCh <-chan delegateAsk) (Result, error) {
 	log := a.log
+	started := time.Now()
 	deadline := time.NewTimer(a.cfg.TaskDeadline)
 	defer deadline.Stop()
 
@@ -1000,10 +1025,24 @@ func (a *adapter) supervise(ctx context.Context, proc *harnessProc, steerCh <-ch
 		reapTook      time.Duration
 		resultText    string
 		resultErr     string // failure subtype from the harness, if any
-		// delegated is set once a delegate request is published: the
-		// turn's deliverable is decided, and nothing the harness says
+		// delegated is set once a session's delegate request is published:
+		// the turn's deliverable is decided, and nothing the harness says
 		// after it changes that.
 		delegated bool
+		// wait is a dispatched task's open delegation (childwait.go): set
+		// when its delegate request is published, it keeps the task open
+		// until the children's ends are delivered as one more turn, whose
+		// result is the deliverable. Kept apart from delegated, which ends
+		// a session's turn, so a profile parent's answer is held to the
+		// same checks as any other.
+		wait *childWait
+		// roundsUsed counts a dispatched task's published delegate
+		// requests, each a delegation round (delegateRounds bounds it).
+		roundsUsed int
+		// reserve fires the wait's delivery ahead of the deadline
+		// (childWaitReserve); nil until the task delegates.
+		reserve  *time.Timer
+		reserveC <-chan time.Time
 		// pendingTurns counts user messages written minus result events
 		// seen: the opening prompt is turn one, every absorbed steer runs
 		// another turn, and the task's deliverable is the result that
@@ -1020,6 +1059,10 @@ func (a *adapter) supervise(ctx context.Context, proc *harnessProc, steerCh <-ch
 		// refused visibly if none does.
 		holdSteers = a.cfg.driver().HoldsSteers()
 		held       []string
+		// heldDelivery is a settled wait's delivery turn under a driver
+		// that holds steers, when it settled mid-turn: written at that
+		// turn's result, after PrepareTurn.
+		heldDelivery string
 	)
 
 	// refuseHeld refuses, on the stream and before the terminal, every steer
@@ -1052,6 +1095,58 @@ func (a *adapter) supervise(ctx context.Context, proc *harnessProc, steerCh <-ch
 		return true
 	}
 
+	// writeDelivery writes the children's ends onto stdin as one user turn,
+	// counted like a steer, so the result that settles it is the
+	// deliverable. A driver that holds steers prepares the turn first, as it
+	// does for a held steer; its failure ends the task.
+	writeDelivery := func(text string) {
+		if holdSteers {
+			if err := a.cfg.driver().PrepareTurn(ctx, a.turnDirs(proc.cmd.Env)); err != nil {
+				log.Warn("preparing the delivery turn failed; ending the task", "task", a.taskID, "err", err)
+				sawResult, resultErr, resultText = true, prepareFailedToken+reasonDetailSeparator+err.Error(), ""
+				proc.closeStdin()
+				return
+			}
+		}
+		if err := proc.writeUser(text); err != nil {
+			log.Warn("delivering the delegated tasks' results failed", "task", a.taskID, "err", err)
+			return
+		}
+		pendingTurns++
+		log.Info("delegated tasks' results delivered as one turn", "task", a.taskID)
+	}
+
+	// deliver settles the wait once: all of its ends, or what has arrived
+	// when the request was refused or the reserve fired, scrubbed (a.scrub,
+	// which reads the seen-values set and never feeds it). Written at once
+	// when the harness is between turns or queues a mid-turn message; a
+	// driver that holds steers gets it at the running turn's result
+	// (heldDelivery).
+	deliver := func(why string) {
+		if wait == nil || wait.delivered {
+			return
+		}
+		wait.delivered = true
+		if reserve != nil {
+			reserve.Stop()
+			reserveC = nil
+		}
+		log.Info("delegated tasks' wait settled", "task", a.taskID, "why", why,
+			"results", len(wait.got), "asked", len(wait.asked), "refused", wait.refusal != nil)
+		text := wait.childDelivery(a.scrub)
+		if holdSteers && pendingTurns > 0 {
+			heldDelivery = text
+			log.Info("delivery held until the turn boundary", "task", a.taskID)
+			return
+		}
+		writeDelivery(text)
+	}
+	defer func() {
+		if reserve != nil {
+			reserve.Stop()
+		}
+	}()
+
 	events := proc.events
 	for events != nil || !exited {
 		select {
@@ -1076,9 +1171,12 @@ func (a *adapter) supervise(ctx context.Context, proc *harnessProc, steerCh <-ch
 				}
 				switch ev.Kind {
 				case EventToolResult:
-					// A tool step's result is in: the call that wrote a
-					// record has exited. Only the record is read, never the
-					// result.
+					// A tool step's result is in. Its content, when the
+					// driver carries one, feeds the seen-values set for the
+					// answer's scrub and is never published. And the call
+					// that wrote a write-refusal record has exited, so the
+					// record is read.
+					a.seen.CollectToolResult(ev.ToolResult)
 					if !a.cfg.StopOnWriteRefusal || a.cfg.WriteRefusalFile == "" || sawResult || delegated || canceled || deadlineHit {
 						continue
 					}
@@ -1105,9 +1203,23 @@ func (a *adapter) supervise(ctx context.Context, proc *harnessProc, steerCh <-ch
 						log.Warn("the init line's model is not a string; the usage parts carry no model", "task", a.taskID)
 					}
 				case EventThinking:
-					a.publishArtifactChunk(ctx, lib.ArtifactThinking, lib.Part{Kind: "text", Text: ev.Text}, false)
+					// Scrubbed as the answer is before it's published: the
+					// debug and audit views read it from TASKS.
+					if text := a.scrub(ev.Text); text != "" {
+						a.publishArtifactChunk(ctx, lib.ArtifactThinking, lib.Part{Kind: "text", Text: text}, false)
+					}
 				case EventProgress:
-					a.publishArtifactChunks(ctx, lib.ArtifactProgress, progressParts(ev.Text, a.askKind), false)
+					// The model's prose is scrubbed as the answer is (scrub).
+					// A piece that opens with unstructured reasoning isn't
+					// published at all: the harness's result is its last text
+					// block, and an answer withheld at the end must not
+					// already be on TASKS as progress.
+					if answerscrub.OpensWithUnstructuredReasoning(ev.Text) {
+						break
+					}
+					if text := a.scrub(ev.Text); text != "" {
+						a.publishArtifactChunks(ctx, lib.ArtifactProgress, progressParts(text, a.askKind), false)
+					}
 				case EventActivity:
 					a.publishActivity(ctx, ev)
 				case EventResult:
@@ -1170,6 +1282,23 @@ func (a *adapter) supervise(ctx context.Context, proc *harnessProc, steerCh <-ch
 						sawResult = true
 						resultErr = ev.Token
 						resultText = ev.Text
+					} else if pendingTurns <= 0 && wait != nil && !wait.delivered {
+						// A turn that ends while the children run is not the
+						// deliverable: stdin stays open for the delivery turn,
+						// and the stream says what the task is waiting on.
+						pendingTurns = 0
+						log.Info("turn result absorbed; waiting on delegated tasks",
+							"task", a.taskID, "outstanding", wait.outstanding())
+						a.publishWorkingNote(waitingText(wait.outstanding()))
+						continue
+					} else if pendingTurns <= 0 && heldDelivery != "" && !canceled && !deadlineHit {
+						// The children's ends arrived mid-turn under a driver
+						// that holds steers: this boundary is the delivery
+						// turn's, and its result is the deliverable.
+						text := heldDelivery
+						heldDelivery = ""
+						writeDelivery(text)
+						continue
 					} else if pendingTurns <= 0 {
 						sawResult = true
 						resultText = ev.Text
@@ -1225,6 +1354,24 @@ func (a *adapter) supervise(ctx context.Context, proc *harnessProc, steerCh <-ch
 				ask.reply <- delegateReply{Message: "a task is already delegated this turn"}
 				continue
 			}
+			// A profile task makes at most the rounds the gateway
+			// advertised (delegateRounds; one when it advertised none),
+			// so at one a second call is refused as it always was. A
+			// call with rounds left while the last round's children run
+			// is refused too: a next round, after their delivery, isn't
+			// built yet.
+			if a.dispatched && roundsUsed >= max(a.delegateRounds, 1) {
+				msg := refuseSecondDelegation
+				if a.delegateRounds > 1 {
+					msg = fmt.Sprintf(refuseRoundsUsed, a.delegateRounds)
+				}
+				ask.reply <- delegateReply{Message: msg}
+				continue
+			}
+			if wait != nil {
+				ask.reply <- delegateReply{Message: refuseWhileWaiting}
+				continue
+			}
 			// Cancel and the deadline end the turn when they fire, not when
 			// the harness finally dies: a call in that window would publish
 			// a child and turn the canceled task into a completed one.
@@ -1241,8 +1388,24 @@ func (a *adapter) supervise(ctx context.Context, proc *harnessProc, steerCh <-ch
 				ask.reply <- delegateReply{Message: "could not publish the delegation; try again"}
 				continue
 			}
-			delegated = true
 			line := delegatedTo(ask.req)
+			if a.dispatched {
+				// A profile task stays open: no deliverable, no kill, no
+				// final. Its children's ends arrive on its .in, and the
+				// reserve delivers what has arrived ahead of the deadline.
+				roundsUsed++
+				wait = newChildWait(ask.req, roundsUsed)
+				next := profileDelegatedOne
+				if len(wait.asked) > 1 {
+					next = profileDelegatedMany
+				}
+				ask.reply <- delegateReply{OK: true, Message: line + next}
+				reserve = time.NewTimer(max(time.Until(started.Add(a.cfg.TaskDeadline-childWaitReserve(a.cfg.TaskDeadline))), 0))
+				reserveC = reserve.C
+				log.Info("delegation published; the task waits on its children", "task", a.taskID, "tasks", len(wait.asked), "delegated", line)
+				continue
+			}
+			delegated = true
 			next := "; this turn ends now and the result arrives as your next turn"
 			if ask.req.IsBatch() {
 				next = "; this turn ends now and the results arrive together as your next turn"
@@ -1257,6 +1420,46 @@ func (a *adapter) supervise(ctx context.Context, proc *harnessProc, steerCh <-ch
 			// it before the terminal decision below.
 			proc.closeStdin()
 			proc.kill(a.cfg.KillGrace)
+
+		case end := <-a.childCh:
+			if stopForAbandon() {
+				continue
+			}
+			if wait == nil || wait.delivered || sawResult || exited || canceled || deadlineHit || refused != nil {
+				log.Warn("child result with no open wait dropped", "task", a.taskID)
+				continue
+			}
+			if end.refusal != nil && !wait.refusalEnds(*end.refusal) {
+				// A refusal for another round (lib.DelegationRefusal.Round):
+				// a lower one is stale, and a higher one refused a request
+				// made after the one the wait is on, whose children are
+				// still running or have reported. It ends nothing.
+				log.Info("delegation refusal for another round dropped; the wait goes on",
+					"task", a.taskID, "round", roundOf(end.refusal.Round), "waitRound", wait.round,
+					"notice", truncate(end.refusal.Text, otherRoundRefusalLogCap))
+				continue
+			}
+			if end.refusal != nil {
+				// Nothing was minted: the whole wait ends.
+				wait.refusal = end.refusal
+				deliver("refused")
+				continue
+			}
+			if !wait.add(*end.result) {
+				log.Info("child result not counted (a duplicate, or an entry not asked for)",
+					"task", a.taskID, "child", end.result.ChildTaskID, "entry", end.result.Entry)
+				continue
+			}
+			if wait.complete() {
+				deliver("complete")
+			}
+
+		case <-reserveC:
+			reserveC = nil
+			if sawResult || exited || canceled || deadlineHit || refused != nil || stopForAbandon() {
+				continue
+			}
+			deliver("deadline-reserve")
 
 		case reason := <-a.abandon:
 			// The dispatcher took the task back (deadline, lease expiry, a
@@ -1331,12 +1534,22 @@ func (a *adapter) supervise(ctx context.Context, proc *harnessProc, steerCh <-ch
 		return Result{Abandoned: true}, nil
 	case refused != nil:
 		return a.endRefused(refused)
+	case sawResult && resultErr == "" && !delegated && answerscrub.OpensWithUnstructuredReasoning(resultText):
+		// The model's reasoning, not an answer (#3206): withheld, as the
+		// bridge withholds it, with the harness session if one is known.
+		a.log.Warn("answer withheld: it opens with a thought line (unstructured model reasoning)",
+			"task", a.taskID, "harnessSession", a.harnessSession, "bytes", len(resultText),
+			"reason", answerscrub.UnstructuredReasoningToken)
+		state := lib.StateFailed
+		return Result{State: state}, a.finalize(state, unstructuredReasoningReason(a.harnessSession), "")
 	case sawResult && resultErr == "":
 		return a.completeWith(resultText)
 	case sawResult:
 		state := lib.StateFailed
+		// The token is the driver's: Claude's is a subtype word, but a driver may
+		// carry error detail here (PrepareTurn), so it is scrubbed like the rest.
 		return Result{State: state}, a.finalize(state,
-			fmt.Sprintf("reason: %s", resultErr), resultText)
+			fmt.Sprintf("reason: %s", a.scrub(resultErr)), resultText)
 	case deadlineHit:
 		state := lib.StateFailed
 		return Result{State: state}, a.finalize(state, "reason: deadline-exceeded", "")
@@ -1347,8 +1560,7 @@ func (a *adapter) supervise(ctx context.Context, proc *harnessProc, steerCh <-ch
 		state := lib.StateFailed
 		reason := "reason: stream-ended-without-result" +
 			reapEvidence(waitErr, reapTook, proc.cmd.WaitDelay) +
-			scanEvidence(proc.scanErr()) +
-			proc.stderrEvidence()
+			a.scrub(scanEvidence(proc.scanErr())) + proc.stderrEvidence(a.scrub)
 		return Result{State: state}, a.finalize(state, reason, "")
 	}
 }
@@ -1365,8 +1577,9 @@ func (a *adapter) endRefused(r *writeRefusal) (Result, error) {
 }
 
 // completeWith publishes the deliverable and the completed terminal: the
-// harness's clean result, or a delegating turn's one-line result. A result
-// that cannot be published fails the task with the publish error.
+// harness's clean result, a delegating turn's one-line result, or a script
+// run's output. The deliverable is scrubbed (publishResult). A result that
+// cannot be published fails the task with the publish error.
 func (a *adapter) completeWith(resultText string) (Result, error) {
 	if err := a.publishResult(resultText); err != nil {
 		state := lib.StateFailed
@@ -1415,11 +1628,13 @@ func (a *adapter) publishUsage(ctx context.Context, t resultTelemetry) {
 // artifacts, the milestone stream the gateway's rolling line renders at zero
 // model cost. (The spec's explicit progress tool is the stage 3 shape;
 // mapping the narration is the playground stand-in, recorded in the
-// findings.) An input that does not marshal publishes nothing.
+// findings.) The entry is the bridge's shape: the tool and a short scrubbed
+// title, no arguments (activityTitle). An entry that does not marshal
+// publishes nothing.
 func (a *adapter) publishActivity(ctx context.Context, ev Event) {
 	entry, err := json.Marshal(map[string]any{
 		"tool":  ev.Tool,
-		"input": ev.Input,
+		"title": a.scrub(activityTitle(ev.Tool, ev.Input)),
 	})
 	if err != nil {
 		return
@@ -1502,7 +1717,7 @@ func (a *adapter) publishArtifactParts(ctx context.Context, name string, parts [
 // "delegated" for a request the gateway never saw waits for a wake that
 // never comes.
 func (a *adapter) publishDelegate(ctx context.Context, req lib.DelegateRequest) error {
-	data, err := json.Marshal(req)
+	data, err := json.Marshal(a.scrubDelegate(req))
 	if err != nil {
 		return err
 	}
@@ -1511,13 +1726,43 @@ func (a *adapter) publishDelegate(ctx context.Context, req lib.DelegateRequest) 
 	return a.publishArtifactPart(ctx, lib.ArtifactDelegate, lib.Part{Kind: "data", Data: data}, false, true)
 }
 
-// publishResult publishes the deliverable as the result artifact, chunked.
-// Empty output still yields one empty chunk: completed must carry a result
-// artifact (assertion 18).
+// scrubDelegate is a delegation with its texts scrubbed as the answer is:
+// the child's request is the model's text, and its parameters' values are
+// too. The maps are copied, not changed in place.
+func (a *adapter) scrubDelegate(req lib.DelegateRequest) lib.DelegateRequest {
+	req.Text = a.scrub(req.Text)
+	req.Parameters = a.scrubParameters(req.Parameters)
+	if len(req.Tasks) > 0 {
+		tasks := make([]lib.DelegateTask, len(req.Tasks))
+		for i, t := range req.Tasks {
+			t.Text = a.scrub(t.Text)
+			t.Parameters = a.scrubParameters(t.Parameters)
+			tasks[i] = t
+		}
+		req.Tasks = tasks
+	}
+	return req
+}
+
+// scrubParameters is a copy of params with each value scrubbed.
+func (a *adapter) scrubParameters(params map[string]string) map[string]string {
+	if params == nil {
+		return nil
+	}
+	out := make(map[string]string, len(params))
+	for k, v := range params {
+		out[k] = a.scrub(v)
+	}
+	return out
+}
+
+// publishResult publishes the deliverable as the result artifact, scrubbed
+// (scrub) and then chunked. Empty output still yields one empty chunk:
+// completed must carry a result artifact (assertion 18).
 func (a *adapter) publishResult(text string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), terminalPublishTimeout)
 	defer cancel()
-	chunks := chunkString(text, resultChunkSize)
+	chunks := chunkString(a.scrub(text), resultChunkSize)
 	for i, chunk := range chunks {
 		if err := a.publishArtifactPart(ctx, lib.ArtifactResult, lib.Part{Kind: "text", Text: chunk},
 			i > 0, i == len(chunks)-1); err != nil {
@@ -1548,6 +1793,31 @@ func (a *adapter) publishSteerRefusal(steer, reason string) {
 	if echo := truncateRunes(strings.TrimSpace(steer), steerEchoCap); echo != "" {
 		text += "\nrefused message: " + echo
 	}
+	if err := a.publishWorking(ctx, text); err != nil {
+		// Loud: the user's correction is now lost with nothing on the
+		// stream saying so, which is exactly the failure this publish
+		// exists to prevent.
+		a.log.Error("steer refusal publish failed; the refused message is now silent",
+			"task", a.taskID, "err", err)
+		return
+	}
+	a.log.Info("steer refusal published", "task", a.taskID)
+}
+
+// publishWorkingNote publishes text as a non-final working status-update,
+// best-effort like publishSteerRefusal: a dispatched task's word, mid-wait,
+// of what it is waiting on.
+func (a *adapter) publishWorkingNote(text string) {
+	ctx, cancel := context.WithTimeout(context.Background(), steerRefusalPublishTimeout)
+	defer cancel()
+	if err := a.publishWorking(ctx, text); err != nil {
+		a.log.Warn("working note publish failed", "task", a.taskID, "err", err)
+	}
+}
+
+// publishWorking publishes one non-final status-update in state working
+// carrying text: never the thing that moves the task, and never final.
+func (a *adapter) publishWorking(ctx context.Context, text string) error {
 	update := lib.StatusUpdate{
 		TaskID:    a.taskID,
 		ContextID: a.contextID,
@@ -1563,23 +1833,13 @@ func (a *adapter) publishSteerRefusal(steer, reason string) {
 	}
 	payload, err := json.Marshal(update)
 	if err != nil {
-		a.log.Error("steer refusal marshal failed", "task", a.taskID, "err", err)
-		return
+		return fmt.Errorf("marshal: %w", err)
 	}
 	env, err := lib.NewStatusUpdateEnvelope(a.from, a.taskID, a.contextID, a.correlationID, payload)
 	if err != nil {
-		a.log.Error("steer refusal envelope failed", "task", a.taskID, "err", err)
-		return
+		return fmt.Errorf("envelope: %w", err)
 	}
-	if err := a.c.Publish(ctx, lib.TaskEventsSubject(a.cfg.Addressee(), a.taskID), env); err != nil {
-		// Loud: the user's correction is now lost with nothing on the
-		// stream saying so, which is exactly the failure this publish
-		// exists to prevent.
-		a.log.Error("steer refusal publish failed; the refused message is now silent",
-			"task", a.taskID, "err", err)
-		return
-	}
-	a.log.Info("steer refusal published", "task", a.taskID)
+	return a.c.Publish(ctx, lib.TaskEventsSubject(a.cfg.Addressee(), a.taskID), env)
 }
 
 // truncateRunes cuts on a rune boundary. The steer echo is user text and may
@@ -1596,7 +1856,7 @@ func truncateRunes(s string, n int) string {
 // finalize publishes the one terminal event, exactly once per process, on a
 // fresh context (the caller's may already be dead - eviction). A reason
 // travels as the status message; evidence (partial output) rides along when
-// present.
+// present, scrubbed (scrub). The task's seen-values set is cleared after.
 func (a *adapter) finalize(state lib.TaskState, reason, evidence string) error {
 	if a.abandoned() {
 		return errAbandoned
@@ -1617,7 +1877,11 @@ func (a *adapter) finalize(state lib.TaskState, reason, evidence string) error {
 		err = a.exec.PublishStatus(ctx, state, true)
 	} else {
 		text := reason
-		if evidence != "" {
+		if answerscrub.OpensWithUnstructuredReasoning(evidence) {
+			// The same rule as the result: withheld, not attached.
+			evidence = ""
+		}
+		if evidence = a.scrub(evidence); evidence != "" {
 			text += "\npartial output:\n" + truncate(evidence, failureEvidenceCap)
 		}
 		update := lib.StatusUpdate{
@@ -1655,7 +1919,39 @@ func (a *adapter) finalize(state lib.TaskState, reason, evidence string) error {
 	a.mu.Lock()
 	a.finalErr = err
 	a.mu.Unlock()
+	a.clearSeen()
 	return err
+}
+
+// scrub is what of a model-written text this task publishes: the task's seen
+// values exact-matched out, then the shape rules (answerscrub.Scrub), one
+// shared implementation for the bridge and session paths.
+func (a *adapter) scrub(text string) string {
+	if text == "" {
+		return ""
+	}
+	return answerscrub.Scrub(text, &a.seen)
+}
+
+// clearSeen empties and closes the task's seen-values set, and says at debug
+// how many values the set refused because a pool was full: a count only,
+// never a value.
+func (a *adapter) clearSeen() {
+	if n := a.seen.Clear(); n > 0 {
+		a.log.Debug(fmt.Sprintf("seen-set refused %d values", n), "task", a.taskID, "refused", n)
+	}
+}
+
+// unstructuredReasoningReason is the terminal message for an answer withheld
+// because it opens with unstructured reasoning: the bridge's token and
+// notice, and the harness session when one is known. The answer's text stays
+// out.
+func unstructuredReasoningReason(harnessSession string) string {
+	reason := fmt.Sprintf("reason: %s - %s", answerscrub.UnstructuredReasoningToken, answerscrub.UnstructuredReasoningNotice)
+	if harnessSession != "" {
+		reason += "; session: " + harnessSession
+	}
+	return reason
 }
 
 // sessionConsumer creates one of the adapter's three consumers, by name.
@@ -2139,6 +2435,22 @@ func (a *adapter) handleInMsg(msg jetstream.Msg, subject string, seen map[string
 				a.log.Error("follow-up message unparseable", "err", err)
 				return
 			}
+			// A child's end, or the refusal of the task's delegation, is the
+			// gateway's word to a dispatched task that waits on its
+			// children (childwait.go); supervise decides whether a wait is
+			// open for it, and whether a refusal is for its round.
+			if end, ok := childEndOf(m.Parts); ok {
+				if a.childCh == nil {
+					a.log.Warn("child result on a task that waits on no children dropped", "task", a.cfg.TaskID)
+					return
+				}
+				select {
+				case a.childCh <- end:
+				default:
+					a.log.Error("child result queue full; the end is dropped and the deadline reserve bounds the wait", "task", a.cfg.TaskID)
+				}
+				return
+			}
 			text := textFromParts(m.Parts)
 			if text == "" {
 				a.log.Warn("follow-up with no text parts dropped", "task", a.cfg.TaskID)
@@ -2243,4 +2555,98 @@ func chunkString(s string, size int) []string {
 		chunks = append(chunks, s)
 	}
 	return chunks
+}
+
+// activityTitle is a tool call's title for the activity artifact, with none
+// of its arguments: a shell command's program and subcommand, a file tool's
+// file name, otherwise the tool's name. It goes through the scrub's shape
+// rules here, and the caller scrubs it again with the task's seen values, so
+// a seen value that looks like a bare word is redacted too.
+func activityTitle(tool string, input json.RawMessage) string {
+	var args map[string]any
+	_ = json.Unmarshal(input, &args)
+	str := func(k string) string { v, _ := args[k].(string); return strings.TrimSpace(v) }
+	title := tool
+	switch tool {
+	case "Bash":
+		if bin, sub := leadingCommand(str("command")); bin != "" {
+			title = strings.TrimSpace(tool + " " + bin + " " + sub)
+		}
+	case "Read", "Write", "Edit", "NotebookEdit":
+		path := str("file_path")
+		if path == "" {
+			path = str("notebook_path")
+		}
+		if path != "" {
+			title = tool + " " + filepath.Base(path)
+		}
+	}
+	return answerscrub.ScrubInline(title)
+}
+
+// leadingCommand is a shell command's program (its base name) and, when the
+// next word isn't a flag, an assignment or a quoted or path-like value, its
+// subcommand. Nothing after those two words is kept.
+func leadingCommand(cmd string) (bin, sub string) {
+	fields := strings.Fields(cmd)
+	i := 0
+	for i < len(fields) && strings.Contains(fields[i], "=") && !strings.HasPrefix(fields[i], "-") {
+		// Leading VAR=value assignments are dropped, but only plain ones:
+		// a quote, an escape or a substitution means the word split may not
+		// be the shell's, so there's no program to name with confidence.
+		if !simpleAssignment.MatchString(fields[i]) {
+			return "", ""
+		}
+		i++
+	}
+	if i >= len(fields) {
+		return "", ""
+	}
+	bin = filepath.Base(fields[i])
+	if !bareWord(bin) {
+		// Not a command name (a quoted value split on its spaces, say):
+		// no program at all rather than a guess.
+		return "", ""
+	}
+	if verbCLIs[bin] && i+1 < len(fields) && lowerVerb(fields[i+1]) {
+		sub = fields[i+1]
+	}
+	return bin, sub
+}
+
+// simpleAssignment is a leading NAME=value word with nothing a shell would
+// treat specially in the value.
+var simpleAssignment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_./:@%+,-]*$`)
+
+// verbCLIs are the programs whose first argument is a verb worth a title
+// (kubectl get, git status). Any other program's next word could be data, so
+// its title is the program alone.
+var verbCLIs = map[string]bool{"kubectl": true, "gcloud": true, "git": true, "helm": true, "gh": true, "terraform": true, "docker": true, "kustomize": true}
+
+// lowerVerb reports whether w is a lowercase verb: a-z and '-', 2 to 20 bytes.
+func lowerVerb(w string) bool {
+	if len(w) < 2 || len(w) > 20 {
+		return false
+	}
+	for _, r := range w {
+		if !(r >= 'a' && r <= 'z' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// bareWord reports whether w looks like a command or subcommand name:
+// letters, digits, '-', '_' and '.', not starting with '-' or '.', at most
+// 32 bytes. A flag, an assignment, a path, a URL or a quoted value isn't.
+func bareWord(w string) bool {
+	if w == "" || len(w) > 32 || w[0] == '-' || w[0] == '.' {
+		return false
+	}
+	for _, r := range w {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.') {
+			return false
+		}
+	}
+	return true
 }

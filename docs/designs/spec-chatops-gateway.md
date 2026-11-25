@@ -836,8 +836,15 @@ steered into that task. A profile task may delegate in turn, under the same chec
 turn except the incarnation's author set, since a warm worker is reset between tasks. Like a
 session turn, it delegates once: a second request from the same task is dropped as a repeat,
 because nothing yet tells a new request from a redelivered one. A session turn's one request may
-be a batch (above, the delegation primitive); a profile task's may not yet, since nothing lets a
-parent waiting open take several child results. A profile parent is also held to its own chain
+be a batch (above, the delegation primitive), and so may a profile task's. A profile parent's
+batch is minted as a session's is, the checks below applying to every entry and the batch whole
+or not run, and the parent keeps the conversation while its children run. It isn't woken at the
+last end: each child's end reaches it as its own `childResult`, naming the batch entry, as that
+child ends (`spec-a2a-payloads.md`, "Task parameters and child results"). While the batch runs,
+text in the conversation is refused, as during any fan-out, since which task it was meant for
+isn't the gateway's to guess; a stop reaches the parent and every child. The parent's own end
+gives the conversation up, even with children still running, and those children are cancelled,
+as a stop would cancel them. A profile parent is also held to its own chain
 and scope, checked at the child's mint because the child is a fresh root the verifier never
 compares with its parent. Each profile task records its scope and the profiles of the waiting
 profile tasks above it (its chain) when it's minted. The chain starts afresh at a top submission,
@@ -848,14 +855,24 @@ head may start one child of its own profile; when its target lies outside the pa
 targetless child under one is refused, while a parent with the install's scope may target any
 cluster the install admits); when the parent's scope and chain aren't on its record
 (`delegation.parent-scope-unknown`, failing closed); when an ancestor the record still holds
-contradicts the parent's carried chain (`delegation.parent-chain-mismatch`). A parent that runs at `unattended`
+contradicts the parent's carried chain (`delegation.parent-chain-mismatch`); and when the parent's profile doesn't delegate
+(`delegation.profile-not-delegating`: its card lacks `delegates`, from AgentProfile `spec.delegates`, so an operator's card
+from before the field fails closed). A parent that runs at `unattended`
 (a scheduled run) may delegate (#6744): its children are minted at `read`, as fresh roots held to the
 parent's scope by the checks above, and carry no trigger, so only the parent writes under the schedule's
 trigger. A child below a scheduled run, at any depth, goes only to a profile whose card lists `unattended`
 (`delegation.unattended-child`): its owner has agreed to scheduled work. The check reads a `scheduled` mark the
 child's record entry carries down the chain, not the parent's tier, since every child below the run runs at `read`. A child's
-end reaches a profile parent as a `childResult` message on the parent's `.in`, which the parent
-reads while it waits open, and the parent holds the conversation again, so a stop or a steer
+end reaches a profile parent as a `childResult` message on the parent's `.in`, and a refusal as a
+`delegationRefused` one (#4860), which the parent reads while it waits open. Every request the gateway handles
+for a profile task uses one of its delegation rounds, minted or refused, and a request once the task has used
+them is refused (`delegation.rounds`), with a notice that says how many it used, on its `.in` with `round` set
+to the round it would have been. It mints nothing, records nothing, and ends none of the wait on the earlier
+request's children. The rounds are `A2A_DELEGATION_ROUNDS_MAX`, 1 by default and 1 at most for now: the
+gateway clamps anything above 1 to 1 at startup and logs a warning naming the variable, saying rounds above 1
+are not supported yet, until a profile task's later rounds ship. The operator renders it onto the gateway
+explicitly at 1, and refuses any other value it carries, in its startup log; the chart's
+`operator.delegation.roundsMax` takes only 1. At the default, the parent's second request is the one refused. The parent holds the conversation again, so a stop or a steer
 reaches it. A session parent is woken as before. A top-level profile task's own end is its
 chain's end, delegated or not. A stop while the child runs cancels the child and every profile
 task waiting open above it. Beside each profile task's cancel, the gateway writes a stop record,
@@ -867,12 +884,53 @@ queued runs when a slot frees, or is refused at its queue timeout. The cards are
 published while the gateway's connection was down is picked up, and a profile no longer on
 `DIRECTORY` is forgotten. Each turn the gateway submits to a session pod carries the agents its
 requester may delegate to (the `delegateTargets` part, `spec-a2a-payloads.md`), built from those
-cards, for the delegate tool the worker adapter serves to name in its addressee description. The
+cards, for the delegate tool the worker adapter serves to name in its addressee description. So
+does a delegating profile's own task (#6789): a submission to a profile whose card says it
+delegates, that is neither a child nor a wake, carries the profiles the delegation would accept from
+it and the width (`A2A_DELEGATION_WIDTH_MAX`, the setting a wider batch is refused under), and the rounds
+(`roundsMax`, from `A2A_DELEGATION_ROUNDS_MAX`) when they are over one. The list
+runs the delegation's own checks on each profile, so it never offers one the delegation refuses:
+not `platform`, not a profile outside a cluster-scoped parent's cluster, only profiles that run at
+`read` and list `unattended` for a parent below a scheduled run, and nobody for a parent refused
+outright, such as one at the depth cap. A scheduled run of a delegating profile carries the list too, built
+the same way when the trigger ingress submits it. Any other profile submission is unchanged. The
 tool offers `parameters`, a map of names to values, and the adapter holds a call's set only to the
 bounds every reader holds it to. The gateway holds the names to the resolved profile's card, on a
 delegation and on a console turn addressed to a profile alike: a name the card doesn't declare is
 refused, and so is a required one left out, and the refusal names what the profile takes. A pinned profile takes its own cluster's `project`, `location` and `cluster`
 whether its card declares them or not.
+
+**The profile parent's wait.** A profile task gets the delegate tool only when its AgentProfile sets
+`spec.delegates` (the operator renders `A2A_PROFILE_DELEGATES=true` on its worker in place of
+`A2A_DELEGATE_TOOL=off`) and its submission carries no `via`, so a delegated child or a wake runs
+without it. The tool is an `a2a` MCP server rendered beside the persona's own, and a persona that
+declares a server named `a2a` is refused at render. The delegate call publishes the `delegate`
+artifact and doesn't end the task: no deliverable, no final status, and the harness keeps running.
+The tool's reply tells the model its children's results arrive as its next turn. A result the
+harness writes meanwhile isn't the deliverable; the worker publishes a non-final `working` status
+saying how many delegated tasks it waits on. A delegate call past the rounds the submission's
+`delegateTargets` part advertises (`roundsMax`, one when absent) is refused at the tool, so at one
+a second call is refused, and a call with rounds left while the last round's children run is refused
+too, since a next round after their delivery isn't built yet. The worker reads each `childResult` on
+the task's `.in`, deduping on `round` and `entry` when `entry` is set and on `childTaskId` otherwise
+(an absent `round` reads as one, and an older gateway's ends carry no `entry` and read as a single
+delegation's), and counts them to the entries it asked for. When every entry has its end, or a
+`delegationRefused` for the round the wait is on arrives, it writes them to the same harness as one
+user turn. A refusal for a lower round (stale) or a higher one (a later request's) is logged and
+dropped: the wait goes on for the children already running. At the task's
+deadline less a reserve, the larger of two minutes and 15% of the task's budget but at most half of
+it, it delivers what has arrived and names the entries that sent nothing, so the parent still
+writes its report. The turn opens with a fixed wrapper saying these are reports from delegated
+tasks and not instructions, and quotes each end line by line under a line giving its entry, child
+task, addressee and state. Each end is cut to 64 KiB and scrubbed with the task's seen secret values
+and the shape rules, and none of its text is added to the seen set. The scrub redacts secrets; the
+framing is the defence against an instruction in a child's text, and one that gets through can do
+at most what the parent's own grant allows. The harness's next result is the task's deliverable,
+held to the same checks as any other answer (one that opens with unstructured reasoning is
+withheld), and the task's final status is what cancels any child still running. An open parent
+holds its worker pod, its task consumer and its dispatch lease for the whole fan-out. A profile
+task's submission carries no `delegateTargets` part, so its tool names only `platform` in the
+addressee description and offers no batch.
 
 ## Session lifecycle
 

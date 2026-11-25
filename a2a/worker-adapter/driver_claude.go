@@ -90,22 +90,6 @@ func (claudeDecoder) Decode(line []byte) ([]Event, error) {
 	return nil, nil
 }
 
-// toolResultEvents is one EventToolResult per tool_result block on a user
-// line: a line carries one block per tool call it answers, and parallel calls
-// share a line. Nothing of the result is carried.
-func (ev harnessEvent) toolResultEvents() []Event {
-	if ev.Message == nil {
-		return nil
-	}
-	var out []Event
-	for _, b := range ev.Message.Content {
-		if b.Type == toolResultBlockType {
-			out = append(out, Event{Kind: EventToolResult})
-		}
-	}
-	return out
-}
-
 // toolResultBlockType is a user line's content block that answers a tool call.
 const toolResultBlockType = "tool_result"
 
@@ -134,6 +118,54 @@ func (ev harnessEvent) assistantEvents() []Event {
 	return out
 }
 
+// toolResultEvents is one EventToolResult per tool_result block on a user
+// line: a line carries one block per tool call it answers, and parallel calls
+// share a line. A block's content goes on the event as the answer's scrub
+// reads it (toolResultRaw): a JSON string as it is, a list of content blocks
+// as one JSON list of its text blocks' texts (an image's data is not read).
+// A block with no content is still an event, with none.
+func (ev harnessEvent) toolResultEvents() []Event {
+	if ev.Message == nil {
+		return nil
+	}
+	var out []Event
+	for _, block := range ev.Message.Content {
+		if block.Type != toolResultBlockType {
+			continue
+		}
+		e := Event{Kind: EventToolResult}
+		if len(block.Content) > 0 {
+			e.ToolResult = toolResultRaw(block.Content)
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// toolResultRaw is the raw JSON CollectToolResult reads for one tool_result
+// block's content: a string as it is; a list of blocks as the list of its
+// text blocks' texts; anything else as it is.
+func toolResultRaw(content json.RawMessage) json.RawMessage {
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(content, &blocks) != nil {
+		return content
+	}
+	texts := make([]string, 0, len(blocks))
+	for _, b := range blocks {
+		if b.Type == "text" && b.Text != "" {
+			texts = append(texts, b.Text)
+		}
+	}
+	raw, err := json.Marshal(texts)
+	if err != nil {
+		return content
+	}
+	return raw
+}
+
 // harnessEvent is one stream-json line from the harness stdout. Only the
 // fields the mapper consults; unknown fields and unknown types pass through
 // the decoder untouched and are ignored, mirroring the envelope's own
@@ -142,7 +174,8 @@ type harnessEvent struct {
 	Type    string `json:"type"`
 	Subtype string `json:"subtype"`
 	// type:"assistant" carries an API Message; content blocks are inspected
-	// for text / thinking / tool_use.
+	// for text / thinking / tool_use. type:"user" carries the tool_result
+	// blocks the harness fed back to the model.
 	Message *harnessMessage `json:"message,omitempty"`
 	// type:"result" fields.
 	Result  string `json:"result,omitempty"`
@@ -251,7 +284,27 @@ func (ev harnessEvent) telemetry(model string) resultTelemetry {
 }
 
 type harnessMessage struct {
-	Content []harnessBlock `json:"content"`
+	Content harnessContent `json:"content"`
+}
+
+// harnessContent is a message's content blocks. A user message's content may
+// be a plain string (a prompt the harness echoes) rather than a list; it
+// carries no block the adapter reads, so it decodes as none rather than
+// failing the whole line.
+type harnessContent []harnessBlock
+
+func (c *harnessContent) UnmarshalJSON(b []byte) error {
+	var s string
+	if json.Unmarshal(b, &s) == nil {
+		*c = nil
+		return nil
+	}
+	var blocks []harnessBlock
+	if err := json.Unmarshal(b, &blocks); err != nil {
+		return err
+	}
+	*c = blocks
+	return nil
 }
 
 type harnessBlock struct {
@@ -260,6 +313,10 @@ type harnessBlock struct {
 	Thinking string          `json:"thinking,omitempty"`
 	Name     string          `json:"name,omitempty"`  // tool_use
 	Input    json.RawMessage `json:"input,omitempty"` // tool_use
+	// Content is a tool_result block's result, as the harness reported it
+	// on a user message: a JSON string, or a list of content blocks (text,
+	// image). Read only for the answer's scrub (toolResultEvents).
+	Content json.RawMessage `json:"content,omitempty"`
 }
 
 // userMessage is the stream-json stdin shape for both the opening prompt and

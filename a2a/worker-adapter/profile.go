@@ -68,6 +68,12 @@ type ProfileWorkerConfig struct {
 	// relay (ProfileRelay, #5495). Empty drops every MCP server the persona
 	// declares, and the render says so.
 	Relay persona.Relay
+	// Delegate is the delegate tool's MCP server (ProfileDelegate), for a
+	// profile that delegates (lib.EnvProfileDelegates) and a Config with a
+	// delegate socket. It is rendered beside the persona's servers for a
+	// task the tool is on for; a child or a wake (a task with via) gets the
+	// persona without it. Zero renders no tool.
+	Delegate persona.Delegate
 	// ConfigRoot is where each task's config directory is made: its own
 	// emptyDir, not the harness's working directory.
 	ConfigRoot string
@@ -153,10 +159,15 @@ func RunProfileWorker(ctx context.Context, cfg Config, pw ProfileWorkerConfig) e
 		return err
 	}
 	if pw.PersonaDir != "" {
-		if w.persona, err = renderPersona(pw, cfg.Logger); err != nil {
+		if w.persona, err = renderPersona(pw, persona.Delegate{}, cfg.Logger); err != nil {
 			return err
 		}
 		logPersonaWarnings(cfg.Logger, w.persona)
+		if cfg.DelegateSocket != "" && pw.Delegate.Command != "" {
+			if w.personaDelegate, err = renderPersona(pw, pw.Delegate, nil); err != nil {
+				return err
+			}
+		}
 	}
 	sub, err := b.nc.ChanSubscribe(lib.DispatchSubject(cfg.Profile, pw.Tier, cfg.PodName), w.msgs)
 	if err != nil {
@@ -190,6 +201,9 @@ type profileWorker struct {
 	ready atomic.Bool
 	// persona is the persona as rendered for the harness, or nil.
 	persona *persona.Output
+	// personaDelegate is the same persona rendered with the delegate tool,
+	// for a profile that delegates; nil otherwise.
+	personaDelegate *persona.Output
 }
 
 // personaDriver is d with the persona's MCP servers in each turn's envelope,
@@ -208,8 +222,9 @@ func (w *profileWorker) personaDriver(d Driver) Driver {
 // running pod, and a persona that doesn't load stops the worker before it
 // takes a task. That includes a persona whose files don't match its
 // build-time content manifest, and, under RequirePersonaIntegrity, one with
-// no manifest. Which of verified or unverified it loaded as is logged.
-func renderPersona(pw ProfileWorkerConfig, log *slog.Logger) (*persona.Output, error) {
+// no manifest. Which of verified or unverified it loaded as is logged, when
+// log is set: the delegate render of the same persona passes nil.
+func renderPersona(pw ProfileWorkerConfig, delegate persona.Delegate, log *slog.Logger) (*persona.Output, error) {
 	// The persona loads, and its files are checked, before the harness is
 	// looked at: the check is the same for every harness, and a persona that
 	// differs from its build is refused as that, whichever driver the
@@ -224,8 +239,10 @@ func renderPersona(pw ProfileWorkerConfig, log *slog.Logger) (*persona.Output, e
 	}
 	// Logged once the persona is one this harness can use, so a refused
 	// harness doesn't follow a success line.
-	logPersonaIntegrity(log, pw.PersonaDir, p)
-	out, err := adapter.Render(p, persona.Target{Relay: pw.Relay})
+	if log != nil {
+		logPersonaIntegrity(log, pw.PersonaDir, p)
+	}
+	out, err := adapter.Render(p, persona.Target{Relay: pw.Relay, Delegate: delegate})
 	if err != nil {
 		return nil, fmt.Errorf("rendering the persona: %w", err)
 	}
@@ -631,9 +648,17 @@ func (w *profileWorker) start(ctx context.Context, h *held) <-chan turnOutcome {
 		} else {
 			removeConfig = remove
 			// The persona's flags (its tool allowlist and denylist, MCP and
-			// setting sources) after the base argv, which carries none.
-			cfg.HarnessCommand = append(append([]string(nil), cfg.HarnessCommand...), w.persona.Args...)
+			// setting sources) after the base argv, which carries none. A
+			// profile that delegates runs with the delegate tool rendered
+			// in, and without it for a task the tool is off for
+			// (delegateOffForTask).
+			base := cfg.HarnessCommand
+			cfg.HarnessCommand = append(append([]string(nil), base...), w.persona.Args...)
 			cfg.HarnessCommandNoDelegate = nil
+			if w.personaDelegate != nil {
+				cfg.HarnessCommandNoDelegate = cfg.HarnessCommand
+				cfg.HarnessCommand = append(append([]string(nil), base...), w.personaDelegate.Args...)
+			}
 			cfg.HarnessEnv = append(cfg.HarnessEnv, cfg.driver().ConfigDirEnv(dir))
 			cfg.Driver = w.personaDriver(cfg.driver())
 		}
