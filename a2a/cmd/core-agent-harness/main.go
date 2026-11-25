@@ -55,6 +55,7 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	refusalLog = stderr
 	// Non-dumpable before anything else: a same-UID command the turn runs
 	// can then neither read this process's memory or environ nor open its
 	// /proc/<pid>/fd. That covers this end of the stdout pipe only; the
@@ -129,7 +130,7 @@ func turn(ctx context.Context, o options, env coreagentwire.Envelope, emit func(
 	if err != nil {
 		return fmt.Errorf("workspace: %w", err)
 	}
-	builtins, permOpts, plugins, err := policySetup(env.Policy, workdir)
+	builtins, permOpts, plugins, err := policySetup(env.Policy, env.MCP, workdir)
 	if err != nil {
 		return fmt.Errorf("tool policy: %w", err)
 	}
