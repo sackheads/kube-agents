@@ -491,11 +491,8 @@ func isDispatcherBucketUser(name string) bool {
 }
 
 // renderableHarness is the harness the worker image runs for a profile that
-// names none, and the only one the operator renders workers for. It is empty:
-// the worker image carries no harness until another is available (#6707), so
-// no profile renders a worker. Tests that exercise the rest of the render set
-// it in their package's test files; nothing outside tests does.
-var renderableHarness = ""
+// names none, and the only one the operator renders workers for: core-agent.
+var renderableHarness = agentv1alpha1.AgentProfileHarnessCoreAgent
 
 // agentProfileHarnessRefusal is the refusal for a profile whose harness the
 // worker image can't run.
@@ -512,5 +509,17 @@ func agentProfileHarnessRefusal(t string) error {
 // claude-code, the prototype harness removed from the worker image, is
 // refused like any other type the image can't run.
 func agentProfileHarnessSupported(t string) bool {
-	return renderableHarness != "" && (t == "" || t == renderableHarness)
+	return renderableHarness != "" && agentProfileEffectiveHarness(t) == renderableHarness
+}
+
+// agentProfileEffectiveHarness is the harness a profile's worker runs for
+// its spec.harness.type: the type it names, or for none the default the
+// worker image runs (renderableHarness). Every decision that follows the
+// harness (whether it renders, its persona render and mount) reads it, so
+// an unset type and the default named explicitly can't render differently.
+func agentProfileEffectiveHarness(t string) string {
+	if t == "" {
+		return renderableHarness
+	}
+	return t
 }

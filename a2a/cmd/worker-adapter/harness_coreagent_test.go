@@ -50,6 +50,27 @@ func TestACoreAgentPodConfiguredForAPersonaRequiresIt(t *testing.T) {
 	}
 }
 
+// A profile worker requires the persona even when the operator rendered no
+// required flag (an older operator, a profile whose render didn't follow
+// the default); a session pod doesn't.
+func TestACoreAgentProfileWorkerRequiresItsPersonaWithoutTheFlag(t *testing.T) {
+	for _, c := range []struct {
+		profile, flag string
+		want          bool
+	}{
+		{"true", "", true},
+		{"", "", false},
+		{"", "true", true},
+	} {
+		t.Setenv(lib.EnvProfileWorker, c.profile)
+		t.Setenv(coreAgentPersonaRequiredEnv, c.flag)
+		argv := strings.Join((coreAgentBuilder{}).command(harnessSpec{path: coreAgentHarnessPath, model: "m"}), " ")
+		if got := strings.Contains(argv, "--persona-required"); got != c.want {
+			t.Errorf("profile worker %q, flag %q: argv %q; want --persona-required=%v", c.profile, c.flag, argv, c.want)
+		}
+	}
+}
+
 // coreAgentInstructions is the system-prompt lines the configured driver
 // sends in a turn's envelope.
 func coreAgentInstructions(t *testing.T, cfg workeradapter.Config) []string {

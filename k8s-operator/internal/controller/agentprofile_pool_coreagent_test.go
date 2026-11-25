@@ -12,8 +12,7 @@ import (
 // A core-agent profile's worker pod renders its persona before the worker
 // starts: an init container, as a user the worker isn't, writes it into an
 // emptyDir the worker mounts read-only where the harness reads it, and the
-// worker is told the persona is required. (Driven through the pod spec
-// directly: the CRD doesn't accept core-agent as a type yet.)
+// worker is told the persona is required.
 func TestACoreAgentProfilePodRendersItsPersonaFirst(t *testing.T) {
 	for _, imageVolumes := range []bool{true, false} {
 		t.Run(map[bool]string{true: "image volumes", false: "staged images"}[imageVolumes], func(t *testing.T) {
@@ -118,11 +117,11 @@ func checkCoreAgentPersonaRender(t *testing.T, imageVolumes bool) {
 	}
 }
 
-// Any other profile's pod is as before: no render, no persona volume, no
-// required flag.
+// A pod for a type the operator doesn't render as core-agent gets no render,
+// no persona volume and no required flag.
 func TestOtherProfilePodsGetNoPersonaRender(t *testing.T) {
 	agent := a2aTestAgent()
-	for _, h := range []string{"", "claude-code"} {
+	for _, h := range []string{"claude-code", "antigravity"} {
 		profile := testAgentProfile(agent.Namespace, "auditor")
 		profile.Spec.Harness.Type = h
 		spec := buildProfileWorkerPodSpec(agent, &profile, "read", "agentprofile-auditor-read", profileWorkerPool, true)
@@ -139,5 +138,43 @@ func TestOtherProfilePodsGetNoPersonaRender(t *testing.T) {
 		if _, ok := envOf(spec.Containers[0])[coreAgentPersonaRequiredEnv]; ok {
 			t.Errorf("type %q: %s set", h, coreAgentPersonaRequiredEnv)
 		}
+	}
+}
+
+// A profile with no type runs the default harness, core-agent, so its pod
+// renders exactly what one naming core-agent does: the same persona render,
+// volumes, mounts and required flag. Only A2A_HARNESS and the waiver beside
+// it differ, rendered when the type is named; the worker reads an unset
+// A2A_HARNESS as core-agent.
+func TestAProfileWithNoTypeRendersAsCoreAgent(t *testing.T) {
+	agent := a2aTestAgent()
+	build := func(h string) corev1.PodSpec {
+		p := testAgentProfile(agent.Namespace, "auditor")
+		p.Spec.Harness.Type = h
+		return buildProfileWorkerPodSpec(agent, &p, "read", "agentprofile-auditor-read", profileWorkerPool, true)
+	}
+	unset, named := build(""), build(coreAgentHarnessType)
+	if !reflect.DeepEqual(unset.InitContainers, named.InitContainers) {
+		t.Errorf("init containers differ:\nunset %+v\nnamed %+v", unset.InitContainers, named.InitContainers)
+	}
+	if !reflect.DeepEqual(unset.Volumes, named.Volumes) {
+		t.Errorf("volumes differ:\nunset %+v\nnamed %+v", unset.Volumes, named.Volumes)
+	}
+	if !reflect.DeepEqual(unset.Containers[0].VolumeMounts, named.Containers[0].VolumeMounts) {
+		t.Errorf("worker mounts differ:\nunset %+v\nnamed %+v", unset.Containers[0].VolumeMounts, named.Containers[0].VolumeMounts)
+	}
+	ue, ne := envOf(unset.Containers[0]), envOf(named.Containers[0])
+	if ue[coreAgentPersonaRequiredEnv] != "true" || ne[coreAgentPersonaRequiredEnv] != "true" {
+		t.Errorf("%s: unset %q, named %q; want true on both", coreAgentPersonaRequiredEnv, ue[coreAgentPersonaRequiredEnv], ne[coreAgentPersonaRequiredEnv])
+	}
+	for _, k := range []string{"A2A_HARNESS", "A2A_HARNESS_UNISOLATED"} {
+		delete(ue, k)
+		delete(ne, k)
+	}
+	if !reflect.DeepEqual(ue, ne) {
+		t.Errorf("worker env differs beyond A2A_HARNESS:\nunset %v\nnamed %v", ue, ne)
+	}
+	if _, set := envOf(unset.Containers[0])["A2A_HARNESS"]; set {
+		t.Error("an unset type rendered A2A_HARNESS; the worker's default stands for it")
 	}
 }

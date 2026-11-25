@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/gke-labs/kube-agents/a2a/lib"
 	"github.com/gke-labs/kube-agents/a2a/lib/persona/coreagent"
 )
 
@@ -34,10 +35,19 @@ func (coreAgentBuilder) defaultPath() string { return coreAgentHarnessPath }
 // in the stdin envelope.
 func (coreAgentBuilder) command(spec harnessSpec) []string {
 	argv := []string{spec.path, "--model", spec.model, "--persona-dir", coreAgentPersonaDir}
-	if os.Getenv(coreAgentPersonaRequiredEnv) == "true" {
+	if coreAgentPersonaRequired(os.Getenv) {
 		argv = append(argv, "--persona-required")
 	}
 	return append(argv, spec.extra...)
+}
+
+// coreAgentPersonaRequired is whether the harness must refuse a missing,
+// writable or unmanifested persona: when the operator says so, and on every
+// profile worker whatever the operator rendered, since a profile's persona
+// is always rendered for core-agent. A session pod's persona is optional:
+// nothing writes one for core-agent yet.
+func coreAgentPersonaRequired(getenv func(string) string) bool {
+	return getenv(coreAgentPersonaRequiredEnv) == "true" || getenv(lib.EnvProfileWorker) == "true"
 }
 
 // env is the pod environment less coreAgentWithheldPrefixes: no model
