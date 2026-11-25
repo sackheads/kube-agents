@@ -7,22 +7,15 @@ import (
 )
 
 // A harness starts the processes a turn's tools run, such as a shell command
-// or an MCP stdio server, as the adapter's user. Those children get the
-// environment minus three things, so no credential the pod carries reaches
-// them:
-//
-//   - every variable the operator sources from a Secret, which it names in
-//     EnvToolWithheld on the container (so a secret added later is withheld
-//     by construction);
-//   - every name with a credential word in it (KEY, TOKEN, SECRET, PASSWORD,
-//     AUTH, CRED and their variants), whatever its source;
-//   - the model, provider, bus and chat routes: where the model, the bus and
-//     the chat backends are, and their keys.
-//
-// Everything else passes, as it does for any harness today: the task's
-// parameters and trigger (PROFILE_TASK_*, PROFILE_TRIGGER_*), the session
-// kube-proxy settings, the image's tool settings, and whatever a tool file
-// reads that is not a credential.
+// or an MCP stdio server, as the adapter's user. Those children get an
+// allowlisted environment, so no credential the pod carries reaches them:
+// the basics a command needs, the task's parameters and trigger
+// (PROFILE_TASK_*, PROFILE_TRIGGER_*), the broker-routed tools' variables
+// (CREDENTIAL_PROXY_*), and, by exact name, every variable a tool file or a
+// shipped persona reads. Everything else is withheld. Two deny layers
+// override the allowlist: a variable the operator sources from a Secret
+// (named in EnvToolWithheld) and a name with a credential word are withheld
+// even when allowed, CREDENTIAL_PROXY_* aside.
 //
 // CREDENTIAL_PROXY_* passes on purpose, credential words and all: the
 // broker-routed wrappers need the broker's URL, the pod's own projected
@@ -92,27 +85,79 @@ func nameParts(name string) []string {
 	return parts
 }
 
-// toolChildWithheldPrefixes and toolChildWithheldNames are the model,
-// provider, bus and chat routes: an endpoint or a key a tool has no use for.
+// toolChildAllowedPrefixes and toolChildAllowedNames are the only variables
+// a turn's tool children may see, deny layers aside. Each name past
+// KUBECONFIG is one a tool file or a shipped persona reads, listed by name
+// rather than by prefix, so a variable added later under the same prefix is
+// withheld until someone reviews it; the completeness scan
+// (TestEveryVariableAToolOrPersonaReadsReachesToolChildren) finds them.
 var (
-	toolChildWithheldPrefixes = []string{
-		"ANTHROPIC_", "GEMINI_", "OPENAI_", "XAI_", "GROQ_", "MISTRAL_", "COHERE_",
-		"AICORE_", "AI_API_", "GW_", "LITELLM_", "AGY_LLM_", "VERTEX_", "BEDROCK_", "AWS_",
-		"DECISION_MEMORY_LLM_", "HF_",
-		"NATS_", "A2A_BUS_",
-		"SLACK_", "DISCORD_", "TEAMS_", "TELEGRAM_",
+	toolChildAllowedPrefixes = []string{
+		"LC_",               // locale
+		"CREDENTIAL_PROXY_", // the broker-routed tools (see above)
+		"PROFILE_TASK_",     // the task's declared parameters (profile.go's taskParameterEnv)
+		"PROFILE_TRIGGER_",  // the submission's trigger (profile.go's taskTriggerEnv)
 	}
-	toolChildWithheldNames = []string{
-		"GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_GEMINI_BASE_URL",
-		"GOOGLE_GENAI_USE_VERTEXAI", "GITHUB_TOKEN", "GH_TOKEN",
+	toolChildAllowedNames = []string{
+		"PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "TMPDIR", "HOSTNAME",
+		"LANG", "LANGUAGE", "TERM", "TZ",
+		"KUBECONFIG",
+		// a session pod's kubectl through its kube-proxy (session-kubectl.sh,
+		// kubectl-context-registered, credential_proxy_client.py)
+		"KUBE_PROXY_URL", "KUBE_PROXY_CA_FILE", "KUBE_PROXY_HOST_CONTEXT", "KUBE_PROXY_MODE",
+		// kubectl admission (kubectl-admit)
+		"KUBEAGENTS_KUBECTL_COST_TIER", "KUBECTL_ADMIT_ON_BUSY", "KUBECTL_ADMIT_GUARD_PATH", "KUBECTL_ADMIT_RUN_DIR",
+		// the shell memory guard
+		"SANDBOX_MEMORY_LIMIT_BYTES",
+		// the VCS tools (vcs_client.py)
+		"KUBE_AGENTS_LOCAL_GIT", "KUBE_AGENTS_VCS_AUTHOR_NAME", "KUBE_AGENTS_VCS_ROOT", "KUBE_AGENTS_VCS_TTL_HOURS",
+		// read by credential_proxy_client.py: the Google universe domain the
+		// broker-routed gcloud and API calls use, and the session ids it
+		// attributes a call to
+		"GOOGLE_CLOUD_UNIVERSE_DOMAIN", "CLOUDSDK_CORE_UNIVERSE_DOMAIN",
+		"HERMES_HOME", "HERMES_CRON_RUN", "HERMES_KANBAN_TASK", "HERMES_SESSION_ID",
+		// read by vcs_readings.py: the commit author and the forge app id
+		"KUBE_AGENTS_VCS_AUTHOR_EMAIL", "GITHUB_APP_ID",
+		// read by the fleet-audit skill's audit_report.py
+		"FLEET_AUDIT_GITOPS_ROOT", "FLEET_AUDIT_LEDGER_SCOPE", "FLEET_AUDIT_REPORTS_DIR", "FLEET_AUDIT_SCRATCH_DIR",
+		"GKE_PROJECT_ID", "GKE_CLUSTER_NAME", "GKE_LOCATION", "KUBEAGENTS_AUDIT_AUTO_PROMOTE",
+		// read by the fleet-audit skill's report_status.py and the fleet
+		// scope arguments (fleet_scope_args.py)
+		"FLEET_AUDIT_REPORT_STORE", "KUBEAGENTS_SCOPE_DECLARED",
+		// read by gitops_workspace.py: the commit author, the forge org, the
+		// lease and state store, and the kube context
+		"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GITHUB_ORG", "GITOPS_ORG",
+		"GITOPS_LEASE_TTL_HOURS", "GITOPS_STATE_CONFIGMAP", "GITOPS_STATE_PATH",
+		"KUBE_CONTEXT_NAME", "KUBE_DEFAULT_NAMESPACE", "PLATFORM_AGENT_HOME",
+		// read by the cluster persona's workload-triage-scan script
+		"WORKLOAD_TRIAGE_BUDGET_SECONDS",
 	}
 )
 
 // Withheld reports whether a turn's tool children must not see the variable
-// name on its own merits: a credential word, or a model, bus or chat route.
+// name on its own merits: it is off the allowlist, or has a credential word.
 // The Secret-sourced names come from the environment itself
 // (WithheldFromToolChildren, toolChildEnv).
 func Withheld(name string) bool {
+	if credentialish(name) {
+		return true
+	}
+	for _, p := range toolChildAllowedPrefixes {
+		if strings.HasPrefix(name, p) {
+			return false
+		}
+	}
+	for _, n := range toolChildAllowedNames {
+		if name == n {
+			return false
+		}
+	}
+	return true
+}
+
+// credentialish reports whether name has a credential word in it, outside
+// CREDENTIAL_PROXY_*: a deny layer that overrides the allowlist.
+func credentialish(name string) bool {
 	if strings.HasPrefix(name, toolChildAlwaysPassedPrefix) {
 		return false
 	}
@@ -124,16 +169,6 @@ func Withheld(name string) bool {
 			if strings.HasSuffix(part, w) {
 				return true
 			}
-		}
-	}
-	for _, p := range toolChildWithheldPrefixes {
-		if strings.HasPrefix(name, p) {
-			return true
-		}
-	}
-	for _, n := range toolChildWithheldNames {
-		if name == n {
-			return true
 		}
 	}
 	return false
