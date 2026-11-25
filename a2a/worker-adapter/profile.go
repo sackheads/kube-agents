@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -660,7 +661,14 @@ func (w *profileWorker) start(ctx context.Context, h *held) <-chan turnOutcome {
 				cfg.HarnessCommand = append(append([]string(nil), base...), w.personaDelegate.Args...)
 			}
 			cfg.HarnessEnv = append(cfg.HarnessEnv, cfg.driver().ConfigDirEnv(dir))
-			cfg.Driver = w.personaDriver(cfg.driver())
+			if _, ok := cfg.driver().(mcpDriver); ok {
+				// The adapter builds each turn's servers from these, adding
+				// the delegate server on a turn that may delegate.
+				cfg.PersonaMCP = slices.Clone(w.persona.MCPServers)
+				if w.personaDelegate != nil {
+					cfg.DelegateMCP = delegateMCPServer(w.pw.Delegate)
+				}
+			}
 		}
 	}
 	removeToken := w.writeTaskToken(h.proxyToken)

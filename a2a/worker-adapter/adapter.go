@@ -24,6 +24,7 @@ import (
 	"github.com/gke-labs/kube-agents/a2a/lib/answerscrub"
 	"github.com/gke-labs/kube-agents/a2a/lib/askkind"
 	"github.com/gke-labs/kube-agents/a2a/lib/chatmsg"
+	"github.com/gke-labs/kube-agents/a2a/lib/persona"
 )
 
 // Config is the adapter's contract with its pod: everything here arrives as
@@ -117,6 +118,15 @@ type Config struct {
 	// is off (delegateOffForTask). Nil means HarnessCommand, which is right
 	// for a stub and for a pod whose tool is off for every task anyway.
 	HarnessCommandNoDelegate []string
+	// PersonaMCP are a profile turn's persona MCP servers (its render's
+	// Output.MCPServers), for a harness that takes them in its stdin envelope
+	// (core-agent). Nil for any other harness.
+	PersonaMCP []persona.MCPServer
+	// DelegateMCP is the profile's delegate server for such a harness
+	// (delegateMCPServer): a turn that may delegate gets it, with that turn's
+	// socket and delegateTargets part in its env (turnDelegateServer). Nil when
+	// the profile doesn't delegate.
+	DelegateMCP *persona.MCPServer
 	// HarnessEnv is the complete environment for the harness subprocess.
 	HarnessEnv []string
 	// HarnessUserSettings is the harness's user settings file
@@ -904,6 +914,14 @@ func (a *adapter) run(ctx context.Context, origin *lib.Envelope, originSeq uint6
 		argv, _ = withDelegateTargetsFor(drv, argv, origin)
 		a.delegateWidth = delegateWidthOf(origin)
 		a.delegateRounds = delegateRoundsOf(origin)
+	}
+	if cfg.PersonaMCP != nil || cfg.DelegateMCP != nil {
+		// A harness that takes its MCP servers in the stdin envelope
+		// (core-agent) gets them here, built from the persona's each turn:
+		// the delegate server only on a turn that may delegate, carrying
+		// this turn's socket and targets, so nothing an earlier turn of a
+		// reused pod was given is kept.
+		drv = withTurnMCP(drv, coreAgentTurnMCP(cfg.PersonaMCP, turnDelegateServer(cfg.DelegateMCP, delegate, socket, origin)))
 	}
 
 	if cfg.SessionReuse {

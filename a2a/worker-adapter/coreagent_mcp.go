@@ -4,6 +4,7 @@ import (
 	"maps"
 	"slices"
 
+	"github.com/gke-labs/kube-agents/a2a/lib"
 	"github.com/gke-labs/kube-agents/a2a/lib/coreagentwire"
 	"github.com/gke-labs/kube-agents/a2a/lib/persona"
 )
@@ -45,4 +46,36 @@ func withTurnMCP(d Driver, servers []coreagentwire.MCPServer) Driver {
 		return m.WithMCP(servers)
 	}
 	return d
+}
+
+// delegateMCPServer is the profile's delegate tool (ProfileDelegate) as an MCP
+// server a harness takes in-process: the same command, args and env the Claude
+// Code render gives its --mcp-config entry, under the reserved name, with the
+// one tool. Nil for the zero Delegate, a profile that doesn't delegate.
+func delegateMCPServer(d persona.Delegate) *persona.MCPServer {
+	if d.Command == "" || d.Tool == "" {
+		return nil
+	}
+	return &persona.MCPServer{Name: persona.DelegateServer, Command: d.Command, Args: slices.Clone(d.Args), Env: maps.Clone(d.Env), Tools: []string{d.Tool}}
+}
+
+// turnDelegateServer is one turn's delegate server: tmpl with the turn's
+// socket, and the submission's delegateTargets part as JSON when it has one
+// that parses, in its env. Nil when the profile has no server or the turn may
+// not delegate (a task with a via, a wake, a pod with the tool off). tmpl is
+// not modified.
+func turnDelegateServer(tmpl *persona.MCPServer, delegate bool, socket string, origin *lib.Envelope) *persona.MCPServer {
+	if tmpl == nil || !delegate || socket == "" {
+		return nil
+	}
+	s := persona.MCPServer{Name: tmpl.Name, Command: tmpl.Command, Args: slices.Clone(tmpl.Args), Env: maps.Clone(tmpl.Env), Tools: slices.Clone(tmpl.Tools)}
+	if s.Env == nil {
+		s.Env = map[string]string{}
+	}
+	s.Env[EnvDelegateSocket] = socket
+	delete(s.Env, EnvDelegateTargets)
+	if raw, ok := delegateTargetsJSON(origin); ok {
+		s.Env[EnvDelegateTargets] = raw
+	}
+	return &s
 }
