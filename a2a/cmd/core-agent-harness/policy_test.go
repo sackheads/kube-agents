@@ -281,6 +281,54 @@ func TestTheGateRunsExactlyTheGrantedShell(t *testing.T) {
 	}
 }
 
+// TestAPersonaShellIsInEffectUnrestricted: a persona's shell grant
+// (toolgrant.Policy.Shell, which Claude Code grants as an unrestricted Bash)
+// through core-agent's real gate. Top-level composition is refused and the
+// verb checks hold, but a single command may be an interpreter that
+// composes anything (`bash -c`, `python3 -c`), and passes: the grant is in
+// effect an unrestricted shell, as on Claude Code, bounded by the sandbox
+// and the broker. Pinned both ways so neither is misread.
+func TestAPersonaShellIsInEffectUnrestricted(t *testing.T) {
+	g, err := toolgrant.Policy{Shell: true}.CoreAgent("/scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(g.Builtins, "bash") {
+		t.Fatalf("builtins %q: a shell grant registers bash", g.Builtins)
+	}
+	_, opts, _, err := policySetup(coreagentwire.Policy{Tools: g.Builtins, Allow: g.Allow, Deny: g.Deny}, nil, "/scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := permissions.New(opts)
+	for cmd, want := range map[string]bool{
+		"kubectl get pods -n x":                                                       true,
+		"gcloud container clusters describe c --zone z":                               true,
+		"/var/lib/agent-persona/skills/stall/scripts/stall_report.py --ns x":          true,
+		"python3 /var/lib/agent-persona/skills/version-control/scripts/vcs.py status": true,
+		"jq -r .items /scratch/pods.json":                                             true,
+		"git status":                                                                  true,
+		"bash -c 'kubectl get pods | jq . > /scratch/o; id'":                          true,
+		"python3 -c 'import os; os.system(\"id\")'":                                   true,
+		"cat /etc/passwd":                                                             true,
+		"kubectl get pods | jq .":                                                     false,
+		"kubectl get pods; id":                                                        false,
+		"kubectl get pods && id":                                                      false,
+		"kubectl get pods > /scratch/out":                                             false,
+		"kubectl get pods 2>&1":                                                       false,
+		"kubectl $(id)":                                                               false,
+		"kubectl `id`":                                                                false,
+		"echo $HOME":                                                                  false,
+		"(id)":                                                                        false,
+		"find / -exec id ;":                                                           false,
+		"git -c core.pager=id log":                                                    false,
+	} {
+		if got := gate.CheckBash(context.Background(), cmd) == nil; got != want {
+			t.Errorf("CheckBash(%q) allowed=%v, want %v", cmd, got, want)
+		}
+	}
+}
+
 // TestAGrantedMCPToolPassesTheGateAndNoOtherDoes: through core-agent's real
 // gate in allow mode, as it checks an MCP call (namespace "mcp", key
 // "<server>_<tool>" plus a space and its JSON arguments), a granted MCP tool
@@ -507,5 +555,71 @@ func TestShellCommandsReadsEitherRuleForm(t *testing.T) {
 		if got := shellCommands(c.allow); !slices.Equal(got, c.want) {
 			t.Errorf("shellCommands(%q) = %q, want %q", c.allow, got, c.want)
 		}
+	}
+}
+
+// TestAPersonaShellRunsAnyCommand: a persona's shell grant
+// (Policy.AnyShellCommand) runs any command, compound ones included, as
+// Claude Code's Bash does, through core-agent's real gate: the decision
+// run's refused commands among them (a skill script whose --body quotes
+// markdown backticks, a multi-line python3 -c). Deny rules and core-agent's
+// built-in denylist still refuse what they match (a deny rule matches the
+// whole command, so it narrows rather than bounds), and the registered
+// tools stay the policy's.
+func TestAPersonaShellRunsAnyCommand(t *testing.T) {
+	g, err := toolgrant.Policy{ReadFiles: true, Shell: true}.CoreAgent("/scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !g.AnyShellCommand {
+		t.Fatal("a persona's shell grant doesn't ask for any command")
+	}
+	p := coreagentwire.Policy{Tools: g.Builtins, Allow: g.Allow, Deny: append(slices.Clone(g.Deny), "bash:kubectl delete*"), AnyShellCommand: g.AnyShellCommand}
+	b, opts, _, err := policySetup(p, nil, "/scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.WriteFile || b.EditFile || b.FetchURL || !b.Bash {
+		t.Errorf("registered built-ins %+v, want the policy's only", b)
+	}
+	gate := permissions.New(opts)
+	const vcs = "python3 /var/run/kube-agents/harness-config/config-task-0016b23ba04607c7-1159668367/skills/version-control/scripts/vcs.py"
+	for cmd, want := range map[string]bool{
+		vcs + " proposal create --repo gke-agentic/kube-agents-evals-3-infra --title \"Add PodDisruptionBudget for checkout-gateway in seeded-reliability\" --body \"Adds a policy/v1 PodDisruptionBudget (`checkout-gateway-pdb`) in `clusters/seeded-a/seeded-reliability/checkout-gateway-pdb.yaml` selecting pods with `app: checkout-gateway` and setting `maxUnavailable: 1` so at least one of the two `checkout-gateway` replicas remains available during voluntary disruptions.\"": true,
+		vcs + " proposal create --repo r --title t --body \"line one\nline two with $VAR\"":                             true,
+		"python3 -c \"\nimport sys\nsys.path.insert(0, '/var/run/x/scripts')\nimport vcs_client\nprint(vcs_client)\n\"": true,
+		"kubectl get deployment d -o yaml && kubectl get pdb -A && kubectl get pods -n x":                               true,
+		"kubectl get pods -A | grep -v Running > /scratch/out 2>&1":                                                     true,
+		"kubectl delete pod p": false,
+		// A deny rule matches the command as a whole, so a compound that
+		// starts with something else passes it: deny rules narrow, they are
+		// not this shell's boundary (the sandbox and the broker are).
+		"echo x; kubectl delete pod p": true,
+		"rm -rf /":                     false,
+	} {
+		if got := gate.CheckBash(context.Background(), cmd) == nil; got != want {
+			t.Errorf("CheckBash(%q) allowed=%v, want %v", cmd, got, want)
+		}
+	}
+}
+
+// TestAnyShellCommandNeedsTheShellAndNoWrite: a policy that runs any shell
+// command must grant the shell, and may not grant a file write, whose
+// workspace scope that mode drops.
+func TestAnyShellCommandNeedsTheShellAndNoWrite(t *testing.T) {
+	for name, p := range map[string]coreagentwire.Policy{
+		"no shell": {Tools: []string{"read_file"}, AnyShellCommand: true},
+		"a write":  {Tools: []string{"bash", "write_file"}, Allow: []string{"bash:*", "write_file:/scratch/*"}, AnyShellCommand: true},
+	} {
+		if _, _, _, err := policySetup(p, nil, "/scratch"); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	_, opts, _, err := policySetup(coreagentwire.Policy{Tools: []string{"bash"}, Allow: []string{"bash:kubectl", "bash:kubectl *"}}, nil, "/scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Mode != permissions.ModeAllow {
+		t.Errorf("a prefix-limited shell runs in mode %q, want allow", opts.Mode)
 	}
 }
