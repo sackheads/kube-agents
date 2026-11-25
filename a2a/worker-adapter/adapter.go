@@ -123,7 +123,7 @@ type Config struct {
 	// (core-agent). Nil for any other harness.
 	PersonaMCP []persona.MCPServer
 	// DelegateMCP is the profile's delegate server for such a harness
-	// (delegateMCPServer): a turn that may delegate gets it, with that turn's
+	// (DelegateServerFor): a turn that may delegate gets it, with that turn's
 	// socket and delegateTargets part in its env (turnDelegateServer). Nil when
 	// the profile doesn't delegate.
 	DelegateMCP *persona.MCPServer
@@ -921,7 +921,13 @@ func (a *adapter) run(ctx context.Context, origin *lib.Envelope, originSeq uint6
 		// the delegate server only on a turn that may delegate, carrying
 		// this turn's socket and targets, so nothing an earlier turn of a
 		// reused pod was given is kept.
-		drv = withTurnMCP(drv, coreAgentTurnMCP(cfg.PersonaMCP, turnDelegateServer(cfg.DelegateMCP, delegate, socket, origin)))
+		ds := turnDelegateServer(cfg.DelegateMCP, delegate, socket, origin)
+		drv = withTurnMCP(drv, coreAgentTurnMCP(cfg.PersonaMCP, ds))
+		if drv, err = withDelegateGrant(drv, ds); err != nil {
+			state := lib.StateFailed
+			ferr := a.finalize(state, "reason: delegate-grant-failed - "+err.Error(), "")
+			return broken(Result{State: state}, ferr)
+		}
 	}
 
 	if cfg.SessionReuse {

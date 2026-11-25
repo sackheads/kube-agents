@@ -180,11 +180,11 @@ cat %q
 // hasn't, nothing for a turn that may not delegate, and the template left as
 // it was.
 func TestTurnDelegateServerCarriesTheTurnsSocketAndTargets(t *testing.T) {
-	tmpl := delegateMCPServer(ProfileDelegate("/self", "/run/base.sock"))
+	tmpl := DelegateServerFor(ProfileDelegate("/self", "/run/base.sock"))
 	if tmpl == nil || tmpl.Name != persona.DelegateServer || !reflect.DeepEqual(tmpl.Args, []string{DelegateMCPCommand}) || !reflect.DeepEqual(tmpl.Tools, []string{DelegateToolName}) {
 		t.Fatalf("delegateMCPServer = %+v", tmpl)
 	}
-	if delegateMCPServer(persona.Delegate{}) != nil {
+	if DelegateServerFor(persona.Delegate{}) != nil {
 		t.Error("the zero Delegate gave a server")
 	}
 	tmpl.Env[EnvDelegateTargets] = `{"targets":[{"name":"stale"}]}`

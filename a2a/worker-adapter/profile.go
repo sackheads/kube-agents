@@ -666,7 +666,7 @@ func (w *profileWorker) start(ctx context.Context, h *held) <-chan turnOutcome {
 				// the delegate server on a turn that may delegate.
 				cfg.PersonaMCP = slices.Clone(w.persona.MCPServers)
 				if w.personaDelegate != nil {
-					cfg.DelegateMCP = delegateMCPServer(w.pw.Delegate)
+					cfg.DelegateMCP = DelegateServerFor(w.pw.Delegate)
 				}
 			}
 		}

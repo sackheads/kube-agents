@@ -385,6 +385,9 @@ func configFromEnv(log *slog.Logger) (workeradapter.Config, bool) {
 		Namespace:       namespace,
 		Scope:           scope,
 		DelegateSocket:  delegateSocket,
+		// A harness that takes MCP servers in its stdin envelope (core-agent)
+		// gets the delegate server there, per turn, rather than in argv.
+		DelegateMCP: sessionDelegateMCP(driver, delegateSocket),
 		// Unset means required: a submission with no capability is
 		// refused. "false" is the mixed-version window only — a gateway
 		// that predates the mint. It does not switch enforcement off; a
@@ -810,4 +813,16 @@ func builderFor(h persona.Harness) (harnessBuilder, error) {
 		return coreAgentBuilder{}, nil
 	}
 	return nil, fmt.Errorf("harness %q has no argv builder", h)
+}
+
+// sessionDelegateMCP is a session pod's delegate server for a harness that
+// takes its MCP servers in the stdin envelope (core-agent): the same command,
+// subcommand and socket harnessCommand gives Claude Code's --mcp-config.
+// The adapter adds it to a turn that may delegate, with that turn's socket,
+// targets and grant. Nil for any other harness, or with the tool off.
+func sessionDelegateMCP(driver workeradapter.Driver, socket string) *persona.MCPServer {
+	if driver == nil || driver.Harness() != persona.CoreAgent || socket == "" {
+		return nil
+	}
+	return workeradapter.DelegateServerFor(workeradapter.ProfileDelegate(selfPath(), socket))
 }

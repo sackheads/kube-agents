@@ -1,12 +1,14 @@
 package workeradapter
 
 import (
+	"fmt"
 	"maps"
 	"slices"
 
 	"github.com/gke-labs/kube-agents/a2a/lib"
 	"github.com/gke-labs/kube-agents/a2a/lib/coreagentwire"
 	"github.com/gke-labs/kube-agents/a2a/lib/persona"
+	"github.com/gke-labs/kube-agents/a2a/lib/persona/toolgrant"
 )
 
 // mcpDriver is a driver that takes a turn's MCP servers in-process, in its
@@ -48,11 +50,11 @@ func withTurnMCP(d Driver, servers []coreagentwire.MCPServer) Driver {
 	return d
 }
 
-// delegateMCPServer is the profile's delegate tool (ProfileDelegate) as an MCP
+// DelegateServerFor is the profile's delegate tool (ProfileDelegate) as an MCP
 // server a harness takes in-process: the same command, args and env the Claude
 // Code render gives its --mcp-config entry, under the reserved name, with the
 // one tool. Nil for the zero Delegate, a profile that doesn't delegate.
-func delegateMCPServer(d persona.Delegate) *persona.MCPServer {
+func DelegateServerFor(d persona.Delegate) *persona.MCPServer {
 	if d.Command == "" || d.Tool == "" {
 		return nil
 	}
@@ -78,4 +80,32 @@ func turnDelegateServer(tmpl *persona.MCPServer, delegate bool, socket string, o
 		s.Env[EnvDelegateTargets] = raw
 	}
 	return &s
+}
+
+// allowDriver is a driver whose harness gates every call, MCP calls
+// included, by its policy's allow rules (core-agent).
+type allowDriver interface {
+	Driver
+	WithAllow(patterns []string) Driver
+}
+
+// mcpGrantWorkspace is the workspace toolgrant renders an MCP-only grant
+// under. An MCP rule doesn't name a path, so its value never reaches a rule.
+const mcpGrantWorkspace = "/workspace"
+
+// withDelegateGrant is d with the gate's allow rules for s's tools, the
+// delegate tool, rendered by toolgrant as any MCP grant is, so the gate
+// passes the call the turn's delegate server was added for. s nil (a turn
+// that may not delegate) or a driver whose harness has no such gate gives d
+// unchanged.
+func withDelegateGrant(d Driver, s *persona.MCPServer) (Driver, error) {
+	a, ok := d.(allowDriver)
+	if !ok || s == nil {
+		return d, nil
+	}
+	g, err := toolgrant.Policy{MCP: []toolgrant.MCPGrant{{Server: s.Name, Tools: s.Tools}}}.CoreAgent(mcpGrantWorkspace)
+	if err != nil {
+		return d, fmt.Errorf("the delegate tool's grant: %w", err)
+	}
+	return a.WithAllow(g.Allow), nil
 }

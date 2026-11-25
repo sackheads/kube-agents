@@ -48,8 +48,8 @@ func coreAgentSessionGrant(getenv func(string) string, workdir string) (coreagen
 // sessionToolPolicy reads a Claude Code allowlist/denylist pair as a
 // harness-neutral grant. A name the denylist carries grants nothing, as in
 // Claude Code. TodoWrite has no grant (no worker is given a to-do tool) and
-// is dropped, and so is the delegate tool until the delegate MCP server is
-// wired. Anything else this doesn't know, an unrestricted Bash and a scoped
+// is dropped, and so is the delegate tool: on core-agent the adapter grants it
+// per turn, with the turn's delegate server (withDelegateGrant). Anything else this doesn't know, an unrestricted Bash and a scoped
 // denylist entry are errors: no guess at a grant.
 func sessionToolPolicy(allowed, disallowed string) (toolgrant.Policy, error) {
 	deny := splitTools(disallowed)
