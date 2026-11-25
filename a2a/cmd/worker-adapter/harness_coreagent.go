@@ -45,14 +45,12 @@ func coreAgentPersonaDir(getenv func(string) string) string {
 }
 
 // coreAgentPersonaRequired is whether this pod's harness refuses a missing,
-// writable or unmanifested persona: always on a session pod, whose persona
-// is in the image; on a profile pod, when the operator says it rendered one.
-func coreAgentPersonaRequired(getenv func(string) string) bool {
-	if getenv(lib.EnvProfileWorker) == "true" {
-		return getenv(coreAgentPersonaRequiredEnv) == "true"
-	}
-	return true
-}
+// writable or unmanifested persona: always. A session pod's persona is in
+// the image; a profile pod's is rendered for every core-agent profile, the
+// default included, whatever the operator's coreAgentPersonaRequiredEnv says
+// (an older operator, or a render that didn't follow the default, would
+// otherwise run it persona-less).
+func coreAgentPersonaRequired(func(string) string) bool { return true }
 
 // coreAgentHarnessPath is where the worker image puts core-agent-harness
 // (a2a/Dockerfile.worker).

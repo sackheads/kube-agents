@@ -102,6 +102,12 @@
             "emptyDir": {
               "sizeLimit": "512Mi"
             }
+          },
+          {
+            "name": "agent-persona",
+            "emptyDir": {
+              "sizeLimit": "64Mi"
+            }
           }
         ],
         "initContainers": [
@@ -138,6 +144,60 @@
                   "ALL"
                 ]
               },
+              "readOnlyRootFilesystem": true,
+              "allowPrivilegeEscalation": false
+            }
+          },
+          {
+            "name": "persona-render",
+            "image": "registry.example/agent-worker:1",
+            "command": [
+              "/usr/local/bin/worker-adapter",
+              "render-persona",
+              "--harness",
+              "core-agent",
+              "--in",
+              "/persona",
+              "--out",
+              "/var/lib/agent-persona-render/persona"
+            ],
+            "env": [
+              {
+                "name": "CREDENTIAL_PROXY_URL",
+                "value": "http://test-agent-credential-proxy.test-ns.svc.cluster.local:8765"
+              }
+            ],
+            "resources": {
+              "limits": {
+                "cpu": "500m",
+                "ephemeral-storage": "64Mi",
+                "memory": "128Mi"
+              },
+              "requests": {
+                "cpu": "50m",
+                "ephemeral-storage": "64Mi",
+                "memory": "64Mi"
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": "persona",
+                "readOnly": true,
+                "mountPath": "/persona"
+              },
+              {
+                "name": "agent-persona",
+                "mountPath": "/var/lib/agent-persona-render"
+              }
+            ],
+            "securityContext": {
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "runAsUser": 1001,
+              "runAsNonRoot": true,
               "readOnlyRootFilesystem": true,
               "allowPrivilegeEscalation": false
             }
@@ -239,6 +299,10 @@
                 "value": "1"
               },
               {
+                "name": "A2A_CORE_AGENT_PERSONA_REQUIRED",
+                "value": "true"
+              },
+              {
                 "name": "A2A_PROFILE_RESET_PATHS",
                 "value": "/scratch:/home/node:/tmp:/var/run/kube-agents/harness-config:/var/run/kube-agents/task-token"
               },
@@ -250,12 +314,12 @@
             "resources": {
               "limits": {
                 "cpu": "1",
-                "ephemeral-storage": "4928Mi",
+                "ephemeral-storage": "4992Mi",
                 "memory": "2Gi"
               },
               "requests": {
                 "cpu": "250m",
-                "ephemeral-storage": "4928Mi",
+                "ephemeral-storage": "4992Mi",
                 "memory": "512Mi"
               }
             },
@@ -299,6 +363,12 @@
                 "name": "persona",
                 "readOnly": true,
                 "mountPath": "/persona"
+              },
+              {
+                "name": "agent-persona",
+                "readOnly": true,
+                "mountPath": "/var/lib/agent-persona",
+                "subPath": "persona"
               }
             ],
             "livenessProbe": {

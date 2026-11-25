@@ -62,21 +62,6 @@ func TestTheCoreAgentArgvCarriesNoSession(t *testing.T) {
 	}
 }
 
-// A profile pod the operator rendered a persona for passes
-// --persona-required; one it didn't, doesn't.
-func TestACoreAgentProfilePodRequiresItsPersonaWhenTold(t *testing.T) {
-	t.Setenv(lib.EnvProfileWorker, "true")
-	argv := strings.Join((coreAgentBuilder{}).command(harnessSpec{path: coreAgentHarnessPath, model: "m"}), " ")
-	if strings.Contains(argv, "--persona-required") {
-		t.Errorf("argv %q requires a persona nothing said was rendered", argv)
-	}
-	t.Setenv(coreAgentPersonaRequiredEnv, "true")
-	argv = strings.Join((coreAgentBuilder{}).command(harnessSpec{path: coreAgentHarnessPath, model: "m"}), " ")
-	if !strings.Contains(argv, "--persona-required") {
-		t.Errorf("argv %q", argv)
-	}
-}
-
 // A session pod reads the persona the image ships for sessions, and always
 // requires it: the tree is in every worker image, so a missing or changed
 // one fails the turn rather than run the session without its skills.
@@ -92,16 +77,14 @@ func TestACoreAgentSessionPodRequiresTheShippedSessionPersona(t *testing.T) {
 	}
 }
 
-// Which harness a session pod runs decides whether it reads the core-agent
-// session persona at all: unset is Claude Code, today's default, with its
-// own config directory; core-agent named explicitly reads the shipped
-// session tree, required.
+// A session pod reads the core-agent session persona whether its harness is
+// unset, the default, or core-agent named explicitly.
 func TestTheSessionPersonaFollowsTheSessionsHarness(t *testing.T) {
 	for _, tc := range []struct {
 		name, harness string
 		wantCoreAgent bool
 	}{
-		{name: "unset", harness: ""},
+		{name: "unset", harness: "", wantCoreAgent: true},
 		{name: "explicit core-agent", harness: string(persona.CoreAgent), wantCoreAgent: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -206,6 +189,18 @@ func writeCoreAgentTree(t *testing.T) string {
 		}
 	})
 	return root
+}
+
+// A profile pod requires its persona even when the operator rendered no
+// required flag: an older operator, or a render that didn't follow the
+// default, can't make it run persona-less.
+func TestACoreAgentProfileWorkerRequiresItsPersonaWithoutTheFlag(t *testing.T) {
+	t.Setenv(lib.EnvProfileWorker, "true")
+	t.Setenv(coreAgentPersonaRequiredEnv, "")
+	argv := (coreAgentBuilder{}).command(harnessSpec{path: coreAgentHarnessPath, model: "m"})
+	if argAfter(argv, "--persona-dir") != coreAgentProfilePersonaDir || !slices.Contains(argv, "--persona-required") {
+		t.Errorf("argv %q, want the profile persona, required", argv)
+	}
 }
 
 // argAfter is the argument after flag in argv, or "".

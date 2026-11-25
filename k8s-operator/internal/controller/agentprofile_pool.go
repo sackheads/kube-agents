@@ -162,9 +162,10 @@ func buildProfileWorkerPodSpec(agent *agentv1alpha1.PlatformAgent, profile *agen
 	if n := profile.Spec.Harness.MaxTurns; n > 0 {
 		env = append(env, corev1.EnvVar{Name: "A2A_MAX_TURNS", Value: strconv.Itoa(int(n))})
 	}
-	// Only when set: a profile without a type renders as before the field
-	// existed, so an operator upgrade rolls no warm pool. The worker reads
-	// unset as Claude Code. Beside it, A2A_HARNESS_UNISOLATED rendered empty:
+	// Only when set: the worker reads an unset A2A_HARNESS as its default,
+	// core-agent, the same harness agentProfileEffectiveHarness names for a
+	// profile without a type; the persona render below follows that effective
+	// harness, not this variable. Beside it, A2A_HARNESS_UNISOLATED rendered empty:
 	// it is the worker adapter's waiver for running a harness without its
 	// isolation, and pod env overrides the image's ENV, so a worker image
 	// can't set it for a type the profile names. It goes when that isolation
@@ -223,7 +224,7 @@ func buildProfileWorkerPodSpec(agent *agentv1alpha1.PlatformAgent, profile *agen
 	}
 	volumes = append(volumes, rendered.Volumes...)
 	initContainers := rendered.InitContainers
-	if profile.Spec.Harness.Type == coreAgentHarnessType {
+	if agentProfileEffectiveHarness(profile.Spec.Harness.Type) == coreAgentHarnessType {
 		// The persona is rendered and sealed before the worker starts, by a
 		// user the harness doesn't run as, and the worker reads it through a
 		// read-only mount, which is what keeps the harness from changing it.

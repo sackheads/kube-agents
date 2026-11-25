@@ -51,10 +51,11 @@ func renderProfileWorkerGolden(t *testing.T) []profileWorkerGolden {
 }
 
 // TestAProfileWithoutAHarnessTypeRendersAsBefore: a profile's warm pool and
-// Job template, as rendered from main before AgentProfile had a harness
-// type (testdata/profile-worker-templates.json). A profile that doesn't set
-// the field must render byte for byte the same, so upgrading the operator
-// rolls no warm pool. Regenerate only for an intended change, with
+// Job template for a profile that doesn't set the harness type
+// (testdata/profile-worker-templates.json), so a change to that render is
+// seen. It was last regenerated when the default became core-agent, which
+// added core-agent's persona render; that upgrade rolls each such warm pool
+// once. Regenerate only for an intended change, with
 // -update-profile-worker-golden.
 func TestAProfileWithoutAHarnessTypeRendersAsBefore(t *testing.T) {
 	got, err := json.MarshalIndent(renderProfileWorkerGolden(t), "", "  ")
