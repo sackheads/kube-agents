@@ -462,14 +462,15 @@ func scScaleDocument(t *testing.T, decl *scopeDeclaration, now time.Time, rows, 
 // bound measures the build rather than the suite's load.
 func TestScopeClustersAtScale(t *testing.T) {
 	const rows, perProject = 5000, 2
-	// The bound on one build after the read. A build here takes about 5ms
-	// with the map (3ms without); with the member hash and the row scan
-	// per project it took about 650ms, and re-parsing the listing on each
-	// build added about 9ms. A tenfold regression passes the bound.
-	// The fastest of the builds is held to it: that is the build's own cost,
-	// where the slowest also carries a scheduler or GC pause on a busy runner
-	// (CI saw 74ms once).
-	const buildBound = 40 * time.Millisecond
+	// The build must stay linear in the document. A wall-clock bound depended
+	// on the runner (CI's fastest build was 79ms where a laptop's is 5ms), so
+	// the test compares the same run's builds instead: the fastest build over
+	// rows must take under growthBound times the fastest over rows/2, plus
+	// growthSlack for timer noise at small durations. Linear growth is about
+	// 2x; the member hash and row scan per project this guards against was
+	// quadratic (about 4x per doubling, 650ms at 5000 rows). Parsing the
+	// listing once per document is asserted directly below.
+	const growthBound, growthSlack = 3, 3 * time.Millisecond
 	explicit := make([]string, 0, 40)
 	for i := range 40 {
 		explicit = append(explicit, fmt.Sprintf("explicit-%03d", i))
@@ -484,9 +485,8 @@ func TestScopeClustersAtScale(t *testing.T) {
 		return cmp.Or(strings.Compare(a.Project, b.Project), strings.Compare(a.Location, b.Location), strings.Compare(a.Cluster, b.Cluster))
 	}
 
-	for _, withClusters := range []bool{true, false} {
-		now := time.Now()
-		raw := scScaleDocument(t, decl, now, rows, perProject, withClusters)
+	build := func(n int, withClusters bool) (*Gateway, TaskRef, string) {
+		raw := scScaleDocument(t, decl, time.Now(), n, perProject, withClusters)
 		client := fake.NewSimpleClientset(&corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "kubeagents-system", Name: scTestConfigMap},
 			Data:       map[string]string{resolvedScopeDataKey: raw},
@@ -497,8 +497,12 @@ func TestScopeClustersAtScale(t *testing.T) {
 		requester := TaskRequester{Backend: consoleBackend, Subject: "hmac:00"}
 		parent := TaskRef{Addressee: "chat", Tier: string(capability.TierRead), Scope: installScope, Requester: &requester}
 		g.cfg.Namespace = chainTestNamespace
-
-		got := g.profileScopeClusters(parent) // the read, the parse, and the first build
+		return g, parent, raw
+	}
+	// fastestOf is the fastest of several builds after the first (the read,
+	// the parse and the first build), each checked against the first.
+	fastestOf := func(g *Gateway, parent TaskRef) (time.Duration, lib.ScopeClusters) {
+		got := g.profileScopeClusters(parent)
 		fastest := time.Duration(1<<63 - 1)
 		for range 5 {
 			start := time.Now()
@@ -508,6 +512,14 @@ func TestScopeClustersAtScale(t *testing.T) {
 				t.Fatalf("a second build differs: %+v", again)
 			}
 		}
+		return fastest, got
+	}
+
+	for _, withClusters := range []bool{true, false} {
+		gHalf, parentHalf, _ := build(rows/2, withClusters)
+		half, _ := fastestOf(gHalf, parentHalf)
+		g, parent, raw := build(rows, withClusters)
+		fastest, got := fastestOf(g, parent)
 		// The listing was parsed once for the document the source holds.
 		cache := g.resolvedScope.(*configMapResolvedScope)
 		doc, _ := cache.load(context.Background())
@@ -540,9 +552,10 @@ func TestScopeClustersAtScale(t *testing.T) {
 		if len(got.UnlistedProjects) != lib.ScopeClustersUnlistedMax {
 			t.Fatalf("%d unlisted named, want %d", len(got.UnlistedProjects), lib.ScopeClustersUnlistedMax)
 		}
-		if fastest > buildBound {
-			t.Fatalf("with the map %v: the fastest of the builds over %d rows took %v, over %v", withClusters, rows, fastest, buildBound)
+		if fastest > growthBound*half+growthSlack {
+			t.Fatalf("with the map %v: the fastest build over %d rows took %v, over %dx the %v over %d rows: the build grows faster than linearly",
+				withClusters, rows, fastest, growthBound, half, rows/2)
 		}
-		t.Logf("with the map %v: %d rows, %d-byte document, fastest build %v", withClusters, rows, len(raw), fastest)
+		t.Logf("with the map %v: %d rows, %d-byte document, fastest build %v (%v over %d rows)", withClusters, rows, len(raw), fastest, half, rows/2)
 	}
 }
