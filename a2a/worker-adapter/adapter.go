@@ -922,7 +922,7 @@ func (a *adapter) run(ctx context.Context, origin *lib.Envelope, originSeq uint6
 		// this turn's socket and targets, so nothing an earlier turn of a
 		// reused pod was given is kept.
 		ds := turnDelegateServer(cfg.DelegateMCP, delegate, socket, origin)
-		drv = withTurnMCP(drv, coreAgentTurnMCP(cfg.PersonaMCP, ds))
+		drv = turnDriver(drv, cfg.PersonaMCP, ds)
 		if drv, err = withDelegateGrant(drv, ds); err != nil {
 			state := lib.StateFailed
 			ferr := a.finalize(state, "reason: delegate-grant-failed - "+err.Error(), "")

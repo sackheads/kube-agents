@@ -207,17 +207,6 @@ type profileWorker struct {
 	personaDelegate *persona.Output
 }
 
-// personaDriver is d with the persona's MCP servers in each turn's envelope,
-// for a harness that takes them in-process (core-agent); any other driver is
-// returned as it is. The delegate server is the turn's to add, since whether
-// a turn may delegate depends on its via.
-func (w *profileWorker) personaDriver(d Driver) Driver {
-	if w.persona == nil {
-		return d
-	}
-	return withTurnMCP(d, coreAgentTurnMCP(w.persona.MCPServers, nil))
-}
-
 // renderPersona loads the profile's persona and renders it for the harness.
 // It runs once: the persona is the image's and doesn't change under a
 // running pod, and a persona that doesn't load stops the worker before it

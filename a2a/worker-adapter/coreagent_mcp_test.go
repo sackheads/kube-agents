@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -44,28 +45,36 @@ func TestACoreAgentTurnCarriesThePersonaServersThenTheDelegate(t *testing.T) {
 	}
 }
 
-// A profile worker with a rendered persona puts its MCP servers in every
-// core-agent turn's stdin envelope; the Claude Code driver, which takes them
-// as flags, is left alone.
-func TestAProfileWorkersCoreAgentTurnsCarryThePersonaServers(t *testing.T) {
-	w := &profileWorker{persona: &persona.Output{MCPServers: []persona.MCPServer{relayServer}}}
-	d := w.personaDriver(newCoreAgentDriver())
-	line, err := d.EncodeUser("hello")
-	if err != nil {
-		t.Fatal(err)
+// Each turn's driver carries the persona's servers, rebuilt from source: a
+// turn without a delegate doesn't keep one an earlier turn had. The Claude
+// Code driver, which takes its servers as flags, is left alone.
+func TestEachTurnsEnvelopeCarriesItsOwnServers(t *testing.T) {
+	delegate := persona.MCPServer{Name: "a2a", Command: "/worker-adapter", Tools: []string{"delegate"}}
+	pod := Driver(newCoreAgentDriver())
+	first := turnDriver(pod, []persona.MCPServer{relayServer}, &delegate)
+	second := turnDriver(first, []persona.MCPServer{relayServer}, nil)
+	for i, tc := range []struct {
+		d    Driver
+		want []string
+	}{{first, []string{"developer_knowledge", "a2a"}}, {second, []string{"developer_knowledge"}}} {
+		line, err := tc.d.EncodeUser("hello")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var env coreagentwire.Envelope
+		if err := json.Unmarshal(line, &env); err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, s := range env.MCP {
+			names = append(names, s.Name)
+		}
+		if !reflect.DeepEqual(names, tc.want) {
+			t.Errorf("turn %d servers = %v, want %v", i+1, names, tc.want)
+		}
 	}
-	var env coreagentwire.Envelope
-	if err := json.Unmarshal(line, &env); err != nil {
-		t.Fatal(err)
-	}
-	if len(env.MCP) != 1 || env.MCP[0].Name != "developer_knowledge" || !reflect.DeepEqual(env.MCP[0].Tools, []string{"search_documents"}) || !reflect.DeepEqual(env.MCP[0].Args, relayServer.Args) {
-		t.Errorf("envelope MCP = %+v", env.MCP)
-	}
-	if _, ok := w.personaDriver(claudeDriver{}).(claudeDriver); !ok {
+	if _, ok := turnDriver(claudeDriver{}, []persona.MCPServer{relayServer}, nil).(claudeDriver); !ok {
 		t.Error("the Claude Code driver was changed")
-	}
-	if got := (&profileWorker{}).personaDriver(newCoreAgentDriver()).(coreAgentDriver); got.MCP != nil {
-		t.Errorf("a worker with no persona set MCP %+v", got.MCP)
 	}
 }
 
@@ -159,6 +168,9 @@ cat %q
 			if (delegate != nil) != tc.want {
 				t.Fatalf("delegate server in the envelope: %v, want %v\n%+v", delegate != nil, tc.want, got.MCP)
 			}
+			if hasDelegateAllow(got.Policy) != tc.want {
+				t.Errorf("delegate allow rule in the policy: %v, want %v\n%v", hasDelegateAllow(got.Policy), tc.want, got.Policy.Allow)
+			}
 			if delegate == nil {
 				return
 			}
@@ -173,6 +185,96 @@ cat %q
 			}
 		})
 	}
+}
+
+// hasDelegateAllow reports whether a turn's policy lets the gate pass a call
+// to the delegate tool.
+func hasDelegateAllow(p coreagentwire.Policy) bool {
+	name := persona.DelegateServer + "_" + DelegateToolName
+	return slices.Contains(p.Allow, "mcp:"+name) && slices.Contains(p.Allow, "mcp:"+name+" *")
+}
+
+// recordingCoreAgentStub is a core-agent harness that keeps each run's stdin
+// envelope as envelope.<n> under dir and answers with a recorded text turn.
+func recordingCoreAgentStub(t *testing.T, dir string) []string {
+	t.Helper()
+	fixture, err := filepath.Abs("testdata/coreagent/text-only.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stub(t, fmt.Sprintf(`
+dir=%q
+n=$(( $(cat "$dir/n" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$dir/n"
+read -r first || exit 1
+printf '%%s' "$first" > "$dir/envelope.$n"
+cat %q
+`, dir, fixture))
+}
+
+func readEnvelope(t *testing.T, dir string, n int) coreagentwire.Envelope {
+	t.Helper()
+	var env coreagentwire.Envelope
+	if err := json.Unmarshal([]byte(readRun(t, dir, "envelope", n)), &env); err != nil {
+		t.Fatalf("run %d's envelope doesn't parse: %v", n, err)
+	}
+	return env
+}
+
+// Through a reused session pod's own runs on core-agent: a human turn gets
+// the delegate server, at that turn's own socket with the gateway's targets
+// for it, and the gate's allow rule for the delegate tool beside the
+// session's own grant; a wake gets neither, and nothing the first turn was
+// given carries over.
+func TestACoreAgentSessionTurnGetsTheDelegateServerAndItsGrantExceptOnAWake(t *testing.T) {
+	url := startServer(t)
+	c := testClient(t, url)
+	const session = "chat-otter-ca1"
+	dir := t.TempDir()
+	sock := delegateSock(t)
+	targets := lib.DelegateTargets{Targets: []lib.DelegateTarget{{Name: "platform"}, {Name: "cluster", Description: "reads one cluster"}}}
+	part, err := lib.DelegateTargetsPart(targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitWithParts(t, c, session, "task-ca-1", "use cluster", part)
+	cfg := reuseConfig(url, "task-ca-1", session, recordingCoreAgentStub(t, dir))
+	cfg.DelegateSocket = sock
+	cfg.Driver = NewCoreAgentDriver(coreagentwire.Policy{Tools: []string{"read_file"}, Allow: []string{"read_file:/workspace/*"}}, nil)
+	cfg.DelegateMCP = DelegateServerFor(ProfileDelegate("/usr/local/bin/worker-adapter", sock))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runAdapter(ctx, cfg)
+	waitState(t, c, session, "task-ca-1", lib.StateCompleted)
+
+	first := readEnvelope(t, dir, 1)
+	if len(first.MCP) != 1 || first.MCP[0].Name != persona.DelegateServer {
+		t.Fatalf("the human turn's servers = %+v, want the delegate server alone", first.MCP)
+	}
+	d := first.MCP[0]
+	if d.Env[EnvDelegateSocket] == "" || d.Env[EnvDelegateSocket] == sock {
+		t.Errorf("the reused pod's turn dials %q, want a socket of its own beside %q", d.Env[EnvDelegateSocket], sock)
+	}
+	var got lib.DelegateTargets
+	if err := json.Unmarshal([]byte(d.Env[EnvDelegateTargets]), &got); err != nil || len(got.Targets) != 2 || got.Targets[1].Name != "cluster" {
+		t.Errorf("the turn's targets %q (%v), want the gateway's two", d.Env[EnvDelegateTargets], err)
+	}
+	if !hasDelegateAllow(first.Policy) || !slices.Contains(first.Policy.Allow, "read_file:/workspace/*") {
+		t.Errorf("the human turn's allow rules = %v, want the session's and the delegate tool's", first.Policy.Allow)
+	}
+
+	submitWithAuthority(t, c, session, "task-ca-2", "the delegation came back", authorityWithVia(t, c, "task-ca-2", session))
+	waitRun(t, dir, "envelope", 2)
+	waitState(t, c, session, "task-ca-2", lib.StateCompleted)
+	wake := readEnvelope(t, dir, 2)
+	if len(wake.MCP) != 0 {
+		t.Errorf("the wake's servers = %+v, want none", wake.MCP)
+	}
+	if hasDelegateAllow(wake.Policy) || !slices.Contains(wake.Policy.Allow, "read_file:/workspace/*") {
+		t.Errorf("the wake's allow rules = %v, want the session's only", wake.Policy.Allow)
+	}
+	cancel()
+	waitOutcome(t, done, 30*time.Second)
 }
 
 // One turn's delegate server: the turn's socket over the template's, the

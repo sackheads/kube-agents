@@ -8,7 +8,9 @@ import (
 
 	"github.com/gke-labs/kube-agents/a2a/lib"
 	"github.com/gke-labs/kube-agents/a2a/lib/coreagentwire"
+	"github.com/gke-labs/kube-agents/a2a/lib/persona"
 	"github.com/gke-labs/kube-agents/a2a/lib/persona/toolgrant"
+	workeradapter "github.com/gke-labs/kube-agents/a2a/worker-adapter"
 )
 
 // TestASessionAllowlistReadsAsANeutralGrant: each Claude Code entry a
@@ -133,5 +135,22 @@ func TestACoreAgentWorkerCarriesItsGrant(t *testing.T) {
 		if _, _, _, err := selectHarness(getenv(extra)); err == nil || !strings.Contains(err.Error(), "tool grant") {
 			t.Errorf("%s: err %v, want a tool-grant refusal", name, err)
 		}
+	}
+}
+
+// A core-agent session pod gets the delegate server as the worker's own `mcp`
+// subcommand at the pod's socket, with only the delegate tool; Claude Code,
+// which takes it in --mcp-config, and a pod with the tool off get none.
+func TestSessionDelegateMCPIsOnlyACoreAgentPodsWithTheTool(t *testing.T) {
+	s := sessionDelegateMCP(workeradapter.NewCoreAgentDriver(coreagentwire.Policy{}, nil), "/run/d.sock")
+	if s == nil || s.Name != persona.DelegateServer || len(s.Args) != 1 || s.Args[0] != workeradapter.DelegateMCPCommand ||
+		s.Env[workeradapter.EnvDelegateSocket] != "/run/d.sock" || len(s.Tools) != 1 || s.Tools[0] != workeradapter.DelegateToolName {
+		t.Fatalf("core-agent session delegate server = %+v", s)
+	}
+	if s := sessionDelegateMCP(workeradapter.NewCoreAgentDriver(coreagentwire.Policy{}, nil), ""); s != nil {
+		t.Errorf("a pod with the tool off got %+v", s)
+	}
+	if s := sessionDelegateMCP(nil, "/run/d.sock"); s != nil {
+		t.Errorf("Claude Code (nil driver) got %+v", s)
 	}
 }
