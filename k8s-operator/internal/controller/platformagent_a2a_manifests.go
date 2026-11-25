@@ -3711,6 +3711,14 @@ func buildA2ASessionNetworkPolicy(agent *agentv1alpha1.PlatformAgent, dnsCluster
 			},
 		)
 	}
+	// DO NOT MERGE (live probe only): the probe's fake upstream on 4000, only
+	// while TWIN_SESSION_UPSTREAM points session pods at it.
+	if os.Getenv("TWIN_SESSION_UPSTREAM") != "" {
+		egress = append(egress, networkingv1.NetworkPolicyEgressRule{
+			Ports: []networkingv1.NetworkPolicyPort{tcpPort(4000)},
+			To:    []networkingv1.NetworkPolicyPeer{namespacedPodPeer(agent.Namespace, map[string]string{"app": "stall-gw"})},
+		})
+	}
 
 	return &networkingv1.NetworkPolicy{
 		TypeMeta: metav1.TypeMeta{APIVersion: "networking.k8s.io/v1", Kind: "NetworkPolicy"},
@@ -7496,6 +7504,13 @@ func buildA2AGatewayDeployment(agent *agentv1alpha1.PlatformAgent) *appsv1.Deplo
 			{Name: "A2A_KUBE_PROXY_CA_CONFIGMAP", Value: kubeProxyCABundleName(agent)},
 			{Name: "A2A_KUBE_PROXY_HOST_CONTEXT", Value: hostClusterContextName(agent)},
 			{Name: "A2A_KUBE_PROXY_MODE", Value: kubeProxyMode},
+		}
+		// DO NOT MERGE (live probe only): pass test-only session switches through.
+		if v := os.Getenv("TWIN_SESSION_ALLOWED_TOOLS"); v != "" {
+			clusterViewEnv = append(clusterViewEnv, corev1.EnvVar{Name: "A2A_TWIN_SESSION_ALLOWED_TOOLS", Value: v})
+		}
+		if v := os.Getenv("TWIN_SESSION_UPSTREAM"); v != "" {
+			clusterViewEnv = append(clusterViewEnv, corev1.EnvVar{Name: "A2A_TWIN_SESSION_UPSTREAM", Value: v})
 		}
 		// The kubectl admission's tier, normalised as for the shell sandbox;
 		// the spawner sets it on each session pod beside KUBE_PROXY_URL.

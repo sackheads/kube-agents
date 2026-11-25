@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -722,6 +723,13 @@ func (s *podSpawner) sessionPodSpec(rec *SessionRecord, taskID, primer string, o
 			corev1.EnvVar{Name: "HERMES_HOME", Value: sessionHermesHome},
 			corev1.EnvVar{Name: lib.EnvClusterView, Value: "true"},
 		)
+		// DO NOT MERGE (live probe only): a test-only session allowlist and upstream.
+		if v := os.Getenv("A2A_TWIN_SESSION_ALLOWED_TOOLS"); v != "" {
+			c.Env = append(c.Env, corev1.EnvVar{Name: "A2A_ALLOWED_TOOLS", Value: v})
+		}
+		if v := os.Getenv("A2A_TWIN_SESSION_UPSTREAM"); v != "" {
+			c.Env = append(c.Env, corev1.EnvVar{Name: "ANTHROPIC_BASE_URL", Value: v})
+		}
 		if s.cfg.CredentialProxyExecURL != "" {
 			c.Env = append(c.Env, corev1.EnvVar{Name: "CREDENTIAL_PROXY_EXEC_URL", Value: s.cfg.CredentialProxyExecURL})
 		}
