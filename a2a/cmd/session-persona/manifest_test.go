@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,9 @@ import (
 
 	"github.com/gke-labs/kube-agents/a2a/lib"
 	personafmt "github.com/gke-labs/kube-agents/a2a/lib/persona"
+	"github.com/gke-labs/kube-agents/a2a/lib/persona/coreagent"
+	"google.golang.org/adk/v2/tool/skilltoolset"
+	"google.golang.org/adk/v2/tool/skilltoolset/skill"
 )
 
 // The tree ships with a content manifest that covers exactly what was
@@ -73,4 +78,97 @@ func TestShippedTreeCatchesAChangedSkillNotHarnessState(t *testing.T) {
 	if !errors.As(err, &inv) || !strings.Contains(err.Error(), sessionSkills[0]+"/"+skillFile) {
 		t.Errorf("CheckTree = %v, want the changed skill named", err)
 	}
+}
+
+// The core-agent layout holds the same persona and skills under the names a
+// core-agent rendering has, and once its write bits are cleared, as the
+// worker image does, it passes the harness's required-persona check and
+// reads as every session skill.
+func TestTheCoreAgentTreeIsARenderingTheHarnessAccepts(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "core-agent-session")
+	if err := buildLayout(repoSkillsDir, repoPersona, out, coreAgentLayout); err != nil {
+		t.Fatal(err)
+	}
+	claude := buildShipped(t)
+	for _, name := range sessionSkills {
+		got, err := os.ReadFile(filepath.Join(out, coreagent.SkillsDir, name, skillFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := os.ReadFile(filepath.Join(claude, skillsDir, name, skillFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != string(want) {
+			t.Errorf("%s differs between the two layouts", name)
+		}
+	}
+	sealTree(t, out)
+	if err := coreagent.VerifyRendering(out, -1); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := coreagent.Snapshot(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := fs.ReadDir(snap.Skills, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != len(sessionSkills) {
+		t.Errorf("snapshot has %d skills, want %d", len(entries), len(sessionSkills))
+	}
+	if snap.Instructions == "" {
+		t.Error("the snapshot has no instructions")
+	}
+	// What the harness does with the skills at each turn: its loader lists
+	// every skill's frontmatter and builds the skill toolset, and refuses a
+	// name outside core-agent's rule, so a skill that would fail every
+	// core-agent session turn fails here instead.
+	for _, name := range sessionSkills {
+		if !coreagent.ValidSkillName(name) {
+			t.Errorf("%s is not a skill name core-agent takes", name)
+		}
+	}
+	src := skill.NewFileSystemSource(snap.Skills)
+	listed, err := src.ListFrontmatters(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != len(sessionSkills) {
+		t.Errorf("the skill loader lists %d skills, want %d", len(listed), len(sessionSkills))
+	}
+	if _, err := skilltoolset.New(context.Background(), skilltoolset.Config{Source: src}); err != nil {
+		t.Errorf("the skill toolset refuses the session skills: %v", err)
+	}
+}
+
+// sealTree clears every write bit under root, as the worker image's
+// `chmod -R a-w` does, and restores them for cleanup.
+func sealTree(t *testing.T, root string) {
+	t.Helper()
+	var dirs []string
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			dirs = append(dirs, p)
+			return nil
+		}
+		return os.Chmod(p, 0o444)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := os.Chmod(dirs[i], 0o555); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, d := range dirs {
+			_ = os.Chmod(d, 0o755)
+		}
+	})
 }
