@@ -13,10 +13,12 @@ import (
 // a file.
 type coreAgentBuilder struct{}
 
+// coreAgentPersonaDir is the persona the harness reads once per turn:
+// rendered by a second UID, read-only to the harness (#6713). A variable
+// only so the wiring test's child process can point it at a test tree.
+var coreAgentPersonaDir = "/var/lib/agent-persona"
+
 const (
-	// coreAgentPersonaDir is the persona the harness reads once per turn:
-	// rendered by a second UID, read-only to the harness (#6713).
-	coreAgentPersonaDir = "/var/lib/agent-persona"
 	// coreAgentPersonaRequiredEnv, "true" on a core-agent profile pod (set by
 	// the operator with its persona-render init container), makes the harness
 	// refuse a missing, writable or unmanifested persona rather than run

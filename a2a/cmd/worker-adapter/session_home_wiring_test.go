@@ -11,6 +11,7 @@ import (
 
 	"github.com/gke-labs/kube-agents/a2a/lib"
 	"github.com/gke-labs/kube-agents/a2a/lib/persona"
+	"github.com/gke-labs/kube-agents/a2a/lib/persona/coreagent"
 )
 
 // runChildEnv makes this test binary run run() and exit with its code, so a
@@ -25,15 +26,18 @@ func TestRunChild(t *testing.T) {
 		t.Skip("helper for the wiring tests below")
 	}
 	os.Args = append([]string{os.Args[0]}, strings.Fields(os.Getenv(runChildEnv+"_ARGS"))...)
+	if d := os.Getenv(runChildEnv + "_COREAGENT_PERSONA"); d != "" {
+		coreAgentPersonaDir = d
+	}
 	os.Exit(run())
 }
 
-// changedSessionHome is a harness home whose shipped skill differs from its
-// manifest: the check fails on it wherever it runs.
+// changedSessionHome is a core-agent persona tree whose shipped skill
+// differs from its manifest: the check fails on it wherever it runs.
 func changedSessionHome(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	files := map[string][]byte{lib.SessionHomePersonaFile: []byte("persona\n"), lib.SessionHomeSkillsDir + "/triage/SKILL.md": []byte("built\n")}
+	files := map[string][]byte{coreagent.InstructionsFile: []byte("persona\n"), coreagent.SkillsDir + "/triage/SKILL.md": []byte("built\n")}
 	for rel, data := range files {
 		p := filepath.Join(dir, rel)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -46,7 +50,7 @@ func changedSessionHome(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(dir, persona.IntegrityManifestFile), persona.FormatIntegrityManifest(files), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, lib.SessionHomeSkillsDir, "triage", "SKILL.md"), []byte("changed\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, coreagent.SkillsDir, "triage", "SKILL.md"), []byte("changed\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return dir
@@ -80,8 +84,10 @@ func runChild(t *testing.T, args string, env ...string) (int, string) {
 func TestRunChecksTheSessionHomeInSessionMode(t *testing.T) {
 	useTestHarness(t)
 	home := changedSessionHome(t)
-	code, stderr := runChild(t, "", "TASK_ID=task-wiring", "PROFILE=p", "NATS_URL=nats://127.0.0.1:1", claudeConfigDirEnv+"="+home, "A2A_WORKDIR="+t.TempDir(),
-		lib.EnvHarness+"=antigravity", lib.EnvHarnessUnisolated+"="+lib.HarnessUnisolatedAllow, "A2A_HARNESS_PATH=/bin/true")
+	// core-agent is the harness whose session persona is checked: Claude
+	// Code isn't in the image, and nothing renders a persona for agy.
+	code, stderr := runChild(t, "", "TASK_ID=task-wiring", "PROFILE=p", "NATS_URL=nats://127.0.0.1:1", runChildEnv+"_COREAGENT_PERSONA="+home, "A2A_WORKDIR="+t.TempDir(),
+		lib.EnvHarness+"=core-agent", "A2A_HARNESS_PATH=/bin/true")
 	if code != 1 || !strings.Contains(stderr, sessionHomeFailure) || !strings.Contains(stderr, "triage/SKILL.md") {
 		t.Errorf("session mode: exit %d, stderr %q; want 1 and the session-home check's error", code, stderr)
 	}
