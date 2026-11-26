@@ -25,9 +25,11 @@ import (
 // carries them back.
 type coreAgentDriver struct {
 	// Policy and MCP are the turn's tool policy and MCP servers, set by
-	// NewCoreAgentDriver from the worker's grant: the session allowlist on a
-	// session pod, the persona's on a profile worker (WithPolicy). MCP is
-	// none until the persona's servers are wired.
+	// Policy is the turn's tool policy, set by NewCoreAgentDriver from the
+	// worker's grant: the session allowlist on a session pod, the persona's
+	// on a profile worker (WithPolicy). MCP is the turn's MCP servers, set
+	// each turn by WithMCP from the persona's (adapter.run, turnDriver); the
+	// pod's driver carries none.
 	Policy coreagentwire.Policy
 	MCP    []coreagentwire.MCPServer
 	// Instructions are the session pod's system-prompt lines, sent in each
