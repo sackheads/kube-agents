@@ -18,6 +18,10 @@ import (
 // test can see what run() does in each mode without a bus.
 const runChildEnv = "WORKER_ADAPTER_TEST_RUN_CHILD"
 
+// runChildSessionPersonaEnv points the child's core-agent session persona at
+// a tree the test wrote.
+const runChildSessionPersonaEnv = "A2A_TEST_SESSION_PERSONA_DIR"
+
 // sessionHomeFailure is the start-up check's error, as run() logs it.
 const sessionHomeFailure = "the session's shipped persona and skills"
 
@@ -26,8 +30,9 @@ func TestRunChild(t *testing.T) {
 		t.Skip("helper for the wiring tests below")
 	}
 	os.Args = append([]string{os.Args[0]}, strings.Fields(os.Getenv(runChildEnv+"_ARGS"))...)
-	if d := os.Getenv(runChildEnv + "_COREAGENT_PERSONA"); d != "" {
-		coreAgentSessionPersonaDir = d
+	// A test can put the core-agent session tree somewhere it wrote one.
+	if dir := os.Getenv(runChildSessionPersonaEnv); dir != "" {
+		coreAgentSessionPersonaDir = dir
 	}
 	os.Exit(run())
 }
@@ -86,7 +91,7 @@ func TestRunChecksTheSessionHomeInSessionMode(t *testing.T) {
 	home := changedSessionHome(t)
 	// core-agent is the harness whose session persona is checked: Claude
 	// Code isn't in the image, and nothing renders a persona for agy.
-	code, stderr := runChild(t, "", "TASK_ID=task-wiring", "PROFILE=p", "NATS_URL=nats://127.0.0.1:1", runChildEnv+"_COREAGENT_PERSONA="+home, "A2A_WORKDIR="+t.TempDir(),
+	code, stderr := runChild(t, "", "TASK_ID=task-wiring", "PROFILE=p", "NATS_URL=nats://127.0.0.1:1", runChildSessionPersonaEnv+"="+home, "A2A_WORKDIR="+t.TempDir(),
 		lib.EnvHarness+"=core-agent", "A2A_HARNESS_PATH=/bin/true")
 	if code != 1 || !strings.Contains(stderr, sessionHomeFailure) || !strings.Contains(stderr, "triage/SKILL.md") {
 		t.Errorf("session mode: exit %d, stderr %q; want 1 and the session-home check's error", code, stderr)
