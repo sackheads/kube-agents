@@ -730,6 +730,12 @@ func (s *podSpawner) sessionPodSpec(rec *SessionRecord, taskID, primer string, o
 		if v := os.Getenv("A2A_TWIN_SESSION_UPSTREAM"); v != "" {
 			c.Env = append(c.Env, corev1.EnvVar{Name: "ANTHROPIC_BASE_URL", Value: v})
 		}
+		if os.Getenv("A2A_TWIN_SESSION_PERSONA_REQUIRED") == "true" {
+			c.Env = append(c.Env, corev1.EnvVar{Name: "A2A_CORE_AGENT_PERSONA_REQUIRED", Value: "true"})
+		}
+		if v := os.Getenv("A2A_TWIN_SESSION_STREAM_IDLE_SECONDS"); v != "" {
+			c.Env = append(c.Env, corev1.EnvVar{Name: "A2A_GATEWAY_PROXY_STREAM_IDLE_SECONDS", Value: v})
+		}
 		if s.cfg.CredentialProxyExecURL != "" {
 			c.Env = append(c.Env, corev1.EnvVar{Name: "CREDENTIAL_PROXY_EXEC_URL", Value: s.cfg.CredentialProxyExecURL})
 		}

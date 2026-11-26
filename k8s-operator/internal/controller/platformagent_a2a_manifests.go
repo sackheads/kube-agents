@@ -7512,6 +7512,12 @@ func buildA2AGatewayDeployment(agent *agentv1alpha1.PlatformAgent) *appsv1.Deplo
 		if v := os.Getenv("TWIN_SESSION_UPSTREAM"); v != "" {
 			clusterViewEnv = append(clusterViewEnv, corev1.EnvVar{Name: "A2A_TWIN_SESSION_UPSTREAM", Value: v})
 		}
+		if v := os.Getenv("TWIN_SESSION_PERSONA_REQUIRED"); v != "" {
+			clusterViewEnv = append(clusterViewEnv, corev1.EnvVar{Name: "A2A_TWIN_SESSION_PERSONA_REQUIRED", Value: v})
+		}
+		if v := os.Getenv("TWIN_SESSION_STREAM_IDLE_SECONDS"); v != "" {
+			clusterViewEnv = append(clusterViewEnv, corev1.EnvVar{Name: "A2A_TWIN_SESSION_STREAM_IDLE_SECONDS", Value: v})
+		}
 		// The kubectl admission's tier, normalised as for the shell sandbox;
 		// the spawner sets it on each session pod beside KUBE_PROXY_URL.
 		if tier, ok := kubectlCostTier(agent); ok {
