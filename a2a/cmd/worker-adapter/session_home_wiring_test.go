@@ -27,7 +27,7 @@ func TestRunChild(t *testing.T) {
 	}
 	os.Args = append([]string{os.Args[0]}, strings.Fields(os.Getenv(runChildEnv+"_ARGS"))...)
 	if d := os.Getenv(runChildEnv + "_COREAGENT_PERSONA"); d != "" {
-		coreAgentPersonaDir = d
+		coreAgentSessionPersonaDir = d
 	}
 	os.Exit(run())
 }
