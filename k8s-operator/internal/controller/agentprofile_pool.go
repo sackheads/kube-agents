@@ -10,6 +10,7 @@ import (
 	"context"
 	goerrors "errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -143,7 +144,7 @@ func buildProfileWorkerPodSpec(agent *agentv1alpha1.PlatformAgent, profile *agen
 		// key in a pod spec (check 3.5, model-credential-plaintext-env), also
 		// a placeholder. worker-adapter adds the placeholder to the harness
 		// env while the pod sets none.
-		{Name: "ANTHROPIC_BASE_URL", Value: fmt.Sprintf("http://%s.%s.svc.cluster.local", inferenceGatewayServiceName, agent.Namespace)},
+		{Name: "ANTHROPIC_BASE_URL", Value: twinProfileUpstream(fmt.Sprintf("http://%s.%s.svc.cluster.local", inferenceGatewayServiceName, agent.Namespace))},
 		{Name: "CREDENTIAL_PROXY_URL", Value: credentialProxyURL(agent)},
 		{Name: "CREDENTIAL_PROXY_TOKEN_FILE", Value: profileWorkerBrokerTokenPath + "/" + profileWorkerBrokerTokenFile},
 		{Name: "CREDENTIAL_PROXY_TASK_TOKEN_FILE", Value: profileWorkerTaskTokenPath + "/token"},
@@ -612,4 +613,13 @@ func withToolWithheldList(env []corev1.EnvVar) []corev1.EnvVar {
 		return env
 	}
 	return append(env, corev1.EnvVar{Name: envToolWithheld, Value: strings.Join(names, ",")})
+}
+
+// DO NOT MERGE (live check only): point profile workers at a fake upstream
+// while TWIN_PROFILE_UPSTREAM is set on the operator.
+func twinProfileUpstream(def string) string {
+	if v := os.Getenv("TWIN_PROFILE_UPSTREAM"); v != "" {
+		return v
+	}
+	return def
 }

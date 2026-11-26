@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"time"
@@ -263,7 +264,7 @@ func buildProfileNetworkPolicy(agent *agentv1alpha1.PlatformAgent, dnsClusterIPs
 				networkingv1.PolicyTypeIngress,
 				networkingv1.PolicyTypeEgress,
 			},
-			Egress: []networkingv1.NetworkPolicyEgressRule{
+			Egress: append([]networkingv1.NetworkPolicyEgressRule{
 				{
 					Ports: []networkingv1.NetworkPolicyPort{udpPort(a2aDNSPort), tcpPort(a2aDNSPort)},
 					To:    clusterDNSPeers(dnsClusterIPs),
@@ -291,9 +292,21 @@ func buildProfileNetworkPolicy(agent *agentv1alpha1.PlatformAgent, dnsClusterIPs
 					Ports: []networkingv1.NetworkPolicyPort{tcpPort(credentialProxyPort)},
 					To:    profileBrokerPeers(agent),
 				},
-			},
+			}, twinProfileEgress(agent)...),
 		},
 	}
+}
+
+// DO NOT MERGE (live check only): the fake upstream on 4000, only while
+// TWIN_PROFILE_UPSTREAM is set.
+func twinProfileEgress(agent *agentv1alpha1.PlatformAgent) []networkingv1.NetworkPolicyEgressRule {
+	if os.Getenv("TWIN_PROFILE_UPSTREAM") == "" {
+		return nil
+	}
+	return []networkingv1.NetworkPolicyEgressRule{{
+		Ports: []networkingv1.NetworkPolicyPort{tcpPort(4000)},
+		To:    []networkingv1.NetworkPolicyPeer{namespacedPodPeer(agent.Namespace, map[string]string{"app": "stall-gw"})},
+	}}
 }
 
 // profileBrokerPeers is the broker in the agent's namespace, and the exec
