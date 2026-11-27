@@ -125,7 +125,9 @@ Selected by `AGENT_TRANSPORT=inject`; unset, or `api`, is the agent API transpor
    during or after a stopped ask's opening turn (`bench/kube_agents_bench/stop_hook.py`). The adapter dedupes on the backend message id,
    bounded the way the Chat adapter bounds its seen set: a repeated `POST` with an id it has
    already accepted gets the answer the first one got, the record's task id or the same refusal,
-   and starts nothing. Because the id
+   and starts nothing. Across a gateway handover the session record answers it instead, through
+   a submission key over the conversation, the id, the intent, the profile and the text (#7456).
+   Because the id
    carries the run id, the dedupe is idempotence within one invocation's retries and never
    across invocations: a rerun of the same case and repetition mints a new run id, so a new key
    and a fresh session record, and the seen set never answers it with an earlier run's task.

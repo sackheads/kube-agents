@@ -1638,7 +1638,9 @@ task id. The door also dedupes an accepted POST on that id, bounded like the Goo
 redelivery set: a retry of a POST whose connection dropped carries the same body and id - by then
 `startTask` has written the active task, so an undeduped retry would be routed as a steer on it -
 and is answered with the task the first POST started, starting nothing, including a retry that
-arrives while the first turn is still in flight. The id is unique per invocation, so a rerun is
+arrives while the first turn is still in flight. Past the door's memory, as across a gateway
+handover, the retry is matched through a submission key on the session record: a hash over the
+conversation, the id, the intent, the profile and the text (#7456). The id is unique per invocation, so a rerun is
 never mistaken for a retry, and each status turn of the harness's delegation wait carries its own,
 `<run>/<case>/<rep>/status-<n>`, so the dedupe does not fold it into the opening task.
 

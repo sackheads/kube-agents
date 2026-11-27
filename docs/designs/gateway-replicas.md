@@ -400,4 +400,4 @@ door conversations in KV. Fenced writes (step 1) are the one piece phase one alr
   task across a failover: a task the new active replica doesn't hold is reported with a reason,
   when that replica started serving, and `mayHaveRun: true`, because the task may have finished
   or may still be running (#5633). The new active replica now reads the task from its record and
-  stream while the record lists it, and a retried send with the same `messageId` is answered with its first task. The inject door does the same for its conversations (#7456).
+  stream while the record lists it, and a retried send with the same `messageId` is answered with its first task. The inject door rebuilds its conversations from the same record and dedupes a retried POST the same way (#7456).

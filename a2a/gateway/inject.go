@@ -678,10 +678,14 @@ type injectConversation struct {
 // drives Discord, and TaskObserver, so it can answer about the task a POST
 // started rather than making the caller parse chat text for it.
 //
-// Everything it holds is in memory and bounded. A restart loses the
-// transcripts and keeps the sessions: the session record is in the KV bucket
-// and the task's events are on the stream, which is where a conversation's
-// history actually lives.
+// Everything it holds is in memory and bounded. A restart drops the posts
+// and edits the relay made and keeps the sessions: the session record is in
+// the KV bucket and the task's events are on the stream, which is where a
+// conversation's history actually lives. A conversation the door doesn't
+// hold is rebuilt from those two (recoverConversation): a task entry for
+// each task, and for each that has ended, its result and its terminal. A
+// retried POST is answered through its submission key on the record
+// (#7456).
 type InjectAdapter struct {
 	listen string
 	token  string
