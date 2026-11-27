@@ -463,3 +463,31 @@ func TestARepeatedInjectPostIsAnsweredWithItsRunningTaskAcrossAHandover(t *testi
 		t.Fatalf("%d envelopes on the in subject, want the first submission alone", n)
 	}
 }
+
+// The rule itself, with no relay to race: a task whose end is on its stream
+// while the record still holds it as active is rebuilt running, with no
+// result and no terminal, so the relay's render of that end is the only one.
+func TestARebuildLeavesAnUnrenderedEndToTheRelay(t *testing.T) {
+	t.Parallel()
+	f := startFakeDoor(t, func(InboundMessage) {})
+	const key, taskID = injectKeyPrefix + "case-rule-unrendered", "task-00000000000000ee"
+	f.door.mu.Lock()
+	f.door.tasks = func(context.Context, string) ([]string, error) { return []string{taskID}, nil }
+	f.door.probe = func(context.Context, string, string) (ConversationState, error) {
+		return ConversationState{TaskID: taskID, Active: true, Final: true,
+			ExecutorState: lib.StateCompleted, Result: "all green"}, nil
+	}
+	f.door.mu.Unlock()
+	if !f.door.recoverConversation(context.Background(), key) {
+		t.Fatal("the rebuild failed")
+	}
+	entries, _, _ := f.door.snapshot(key, 0, "")
+	if len(entries) != 1 || entries[0].Kind != InjectEntryTask || entries[0].TaskID != taskID {
+		t.Fatalf("entries = %+v, want the task's entry alone", entries)
+	}
+	f.door.TaskTerminal(key, taskID, lib.StateCompleted, TerminalFromExecutor, "")
+	entries, _, _ = f.door.snapshot(key, 0, "")
+	if terms := terminalEntries(entries); len(terms) != 1 {
+		t.Errorf("terminals = %+v, want the relay's one", terms)
+	}
+}
