@@ -1333,9 +1333,12 @@ func (a *InjectAdapter) snapshot(key string, after int, taskID string) ([]Inject
 // injectCounts is what a waiting request records before handing a message
 // over, so it can tell this turn's work from the last one's.
 type injectCounts struct {
-	starts           int
-	accepted         int
-	publishFailed    int
+	starts        int
+	accepted      int
+	publishFailed int
+	// entries is the conversation's last sequence, not a count: numbering
+	// starts at the serving base (seqBase), and a wait compares it with a
+	// later reading.
 	entries          int
 	drops            int
 	turns            int
@@ -1350,11 +1353,9 @@ type injectCounts struct {
 // countsOf reads a conversation's counts. Caller holds a.mu.
 func countsOf(conv *injectConversation) injectCounts {
 	return injectCounts{
-		starts:        conv.started.total,
-		accepted:      conv.accepted.total,
-		publishFailed: conv.publishFailed.total,
-		// The last sequence, not a count: numbering starts at the serving
-		// base (seqBase), and a wait compares it with a later reading.
+		starts:           conv.started.total,
+		accepted:         conv.accepted.total,
+		publishFailed:    conv.publishFailed.total,
 		entries:          conv.nextSeq - 1,
 		drops:            conv.drops,
 		turns:            conv.turns,
