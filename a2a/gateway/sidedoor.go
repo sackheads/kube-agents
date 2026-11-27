@@ -471,6 +471,16 @@ func (s *sideDoorAdapter) SetProbe(probe ConversationProbe) {
 	}
 }
 
+// SubmissionMatched goes to the door that owns the conversation, as the
+// task observers do; the primary never sets a submission key.
+func (s *sideDoorAdapter) SubmissionMatched(conversation, taskID string) {
+	if d := s.doorFor(conversation); d != nil {
+		if observer, ok := d.(SubmissionObserver); ok {
+			observer.SubmissionMatched(conversation, taskID)
+		}
+	}
+}
+
 // SetTaskLocator hands the door task index to every door that can use it
 // (TaskLocatorSink); implemented unconditionally, as SetProbe is.
 func (s *sideDoorAdapter) SetTaskLocator(locate TaskLocator) {

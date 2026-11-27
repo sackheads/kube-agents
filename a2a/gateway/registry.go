@@ -365,6 +365,12 @@ type TaskRequester struct {
 type TaskRef struct {
 	ID        string `json:"id"`
 	Addressee string `json:"addressee"`
+	// SubmissionKey is the door's hash of the caller and the messageId the
+	// turn that started this task named (InboundMessage.SubmissionKey), on a
+	// chain's root only. A repeat of it on the conversation is answered with
+	// this task (matchSubmission). An older gateway drops it when it
+	// rewrites the record, and a repeat then starts the task again.
+	SubmissionKey string `json:"submissionKey,omitempty"`
 	// RelayedSeqs are the stream sequences of this task's most recent
 	// events the relay rendered (at most relayedSeqCap), written with the
 	// render. A redelivered event found here was rendered by a gateway that

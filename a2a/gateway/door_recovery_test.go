@@ -11,13 +11,17 @@ import (
 // handOver stops r's gateway and starts a fresh one on the same bus, as a
 // failover or a rollout hands the door to the other replica: the bus, the
 // session records and the task streams survive; the door's memory does not.
-func handOver(t *testing.T, r *a2aRig) *a2aRig {
+func handOver(t *testing.T, r *a2aRig, whileDown ...func()) *a2aRig {
 	t.Helper()
 	r.stop()
 	select {
 	case <-r.ran:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the first gateway did not stop")
+	}
+	// Run with no gateway serving, so nothing rewrites what they write.
+	for _, f := range whileDown {
+		f()
 	}
 	return startA2ARigTuned(t, func(door *A2ADoor) Adapter {
 		return WithSideDoors(newFakeAdapter(), []DoorSpec{A2ADoorSpec(door)}, nil)

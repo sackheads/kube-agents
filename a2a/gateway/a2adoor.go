@@ -774,13 +774,20 @@ func (d *A2ADoor) send(r *http.Request, verified string, handler func(InboundMes
 		}
 		contextID = task.contextID
 	}
+	messageID := strings.TrimSpace(msg.MessageID)
 	if contextID == "" {
-		contextID = a2aContextIDPrefix + randHex(messageIDHexWidth)
+		if messageID != "" {
+			// Derived, not drawn: a retry of this send after a handover
+			// reaches the same conversation, whose record holds the task the
+			// first attempt started (a2aSubmissionKey).
+			contextID = a2aDerivedContextID(caller, messageID)
+		} else {
+			contextID = a2aContextIDPrefix + randHex(messageIDHexWidth)
+		}
 	}
 	key := a2aConversationKey(caller, contextID)
 	blocking := params.Configuration != nil && params.Configuration.Blocking != nil && *params.Configuration.Blocking
 
-	messageID := strings.TrimSpace(msg.MessageID)
 	// The wait for the turn's answer. A named message id is the dedupe key,
 	// and a retry after a dropped connection must be answered with the
 	// task the first attempt started, so the turn waits on a context the
@@ -823,13 +830,14 @@ func (d *A2ADoor) send(r *http.Request, verified string, handler func(InboundMes
 		return rpcFail(req.ID, rerr.Code, rerr.Message, nil)
 	}
 	handler(InboundMessage{
-		Conversation: key,
-		Kind:         a2aConversationKind,
-		AuthorID:     caller,
-		MessageID:    messageID,
-		Text:         text,
-		Backend:      a2aBackendForCaller(caller),
-		TaskID:       msg.TaskID,
+		Conversation:  key,
+		Kind:          a2aConversationKind,
+		AuthorID:      caller,
+		MessageID:     messageID,
+		Text:          text,
+		Backend:       a2aBackendForCaller(caller),
+		TaskID:        msg.TaskID,
+		SubmissionKey: a2aSubmissionKey(caller, strings.TrimSpace(msg.MessageID)),
 	})
 	taskID, reply, rerr := d.awaitTurn(turnCtx, key, prior, deadline)
 	d.completeOutcome(outcome, taskID, reply, rerr)

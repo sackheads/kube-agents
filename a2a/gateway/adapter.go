@@ -34,6 +34,13 @@ type InboundMessage struct {
 	// correlationId in the ingress log so the audit chain runs chat message ->
 	// correlationId -> every hop -> change.
 	MessageID string
+	// SubmissionKey, set by the A2A door on a send that names a messageId,
+	// is a hash of the caller and that id (a2aSubmissionKey). The gateway
+	// stamps it on the task the turn starts (TaskRef.SubmissionKey) and
+	// answers a repeat of it on the conversation with that task instead of
+	// starting another (matchSubmission): the dedupe a gateway handover
+	// doesn't forget.
+	SubmissionKey string
 	// Text is the message content.
 	Text string
 	// Quoted is the turn's text when it reaches an agent: the member's words
@@ -620,6 +627,14 @@ type ProbeSink interface {
 // the task. It may delete an index entry it finds leading nowhere, so only
 // the active gateway hands it out.
 type TaskLocator func(ctx context.Context, taskID string) (string, error)
+
+// SubmissionObserver is the optional extension a door implements to be told
+// that a turn repeats a submission the conversation's record already holds
+// (InboundMessage.SubmissionKey): the turn started nothing, and taskID is the
+// task the first attempt started.
+type SubmissionObserver interface {
+	SubmissionMatched(conversation, taskID string)
+}
 
 // TaskLocatorSink is the optional extension a door implements to find a
 // task it didn't see start, as after a gateway handover (#7454).

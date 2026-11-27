@@ -1362,7 +1362,43 @@ func (g *Gateway) runTurn(ctx context.Context, msg InboundMessage, backend, prin
 			"conversation", msg.Conversation, "messageId", msg.MessageID, "err", err)
 		return
 	}
+	if taskID := g.matchSubmission(ctx, msg); taskID != "" {
+		g.log.Info("turn repeats a submission the record holds; answered with its task",
+			"conversation", msg.Conversation, "messageId", msg.MessageID, "taskId", taskID)
+		g.observeSubmissionMatched(msg.Conversation, taskID)
+		return
+	}
 	g.routeTurn(ctx, msg, backend, principal)
+}
+
+// matchSubmission is the task the conversation's record holds for the
+// turn's submission key, or "": the dedupe that survives a handover. Run
+// under the session lock, so a repeat racing its first attempt waits for
+// that attempt's record write and finds its entry. A record that can't be
+// read is no match: the turn goes on as it would have before the key
+// existed.
+func (g *Gateway) matchSubmission(ctx context.Context, msg InboundMessage) string {
+	if msg.SubmissionKey == "" {
+		return ""
+	}
+	rec, err := g.reg.Get(ctx, msg.Conversation)
+	if err != nil || rec == nil {
+		return ""
+	}
+	for _, ref := range rec.Tasks {
+		if ref.SubmissionKey == msg.SubmissionKey && ref.rootID() == ref.ID {
+			return ref.ID
+		}
+	}
+	return ""
+}
+
+// observeSubmissionMatched tells a SubmissionObserver that a turn repeated a
+// submission the record holds.
+func (g *Gateway) observeSubmissionMatched(conversation, taskID string) {
+	if observer, ok := g.adapter.(SubmissionObserver); ok {
+		observer.SubmissionMatched(conversation, taskID)
+	}
 }
 
 // droppedNoticeKey is the once-per-sender memory's key: the backend the
@@ -3374,6 +3410,8 @@ type taskStart struct {
 	// gateway starts on its own (a child, a wake) has no backend message.
 	MessageID string
 	Principal string
+	// SubmissionKey is InboundMessage's, stamped on the task's history entry.
+	SubmissionKey string
 	// Click and Answer are InboundMessage's: the turn continues the
 	// conversation's previous ask, whose message its chain marks. A click
 	// names no message of its own; an answer with no earlier chain marks
@@ -3480,16 +3518,17 @@ func childKeepsLine(rec *SessionRecord, ts taskStart) bool {
 func (g *Gateway) startTask(ctx context.Context, rec *SessionRecord, msg InboundMessage, backend, principal string, authority Authority, route *profileRoute) string {
 	g.noteUnreadQuote(rec.Key, msg)
 	taskID, _ := g.startTaskWith(ctx, rec, taskStart{
-		Route:     route,
-		Text:      agentText(msg),
-		ReplyTo:   msg.ReplyTo,
-		MessageID: msg.MessageID,
-		Click:     msg.Click,
-		Answer:    msg.Answer,
-		ArrivedAt: msg.ArrivedAt,
-		Principal: principal,
-		Requester: TaskRequester{Backend: backend, Subject: requesterSubject(g.ps, backend, msg.AuthorID)},
-		Authority: authority,
+		Route:         route,
+		Text:          agentText(msg),
+		ReplyTo:       msg.ReplyTo,
+		MessageID:     msg.MessageID,
+		SubmissionKey: msg.SubmissionKey,
+		Click:         msg.Click,
+		Answer:        msg.Answer,
+		ArrivedAt:     msg.ArrivedAt,
+		Principal:     principal,
+		Requester:     TaskRequester{Backend: backend, Subject: requesterSubject(g.ps, backend, msg.AuthorID)},
+		Authority:     authority,
 		// A structured confirm action only: free text never sets it.
 		ChangeRequested: msg.Intent == IntentConfirm,
 	})
@@ -3731,6 +3770,9 @@ func (g *Gateway) startTaskWith(ctx context.Context, rec *SessionRecord, ts task
 		ref.Scope = string(ts.Route.Scope)
 		ref.ProfileChain = ts.ProfileChain
 		ref.Scheduled = ts.Scheduled
+	}
+	if ts.SubmissionKey != "" && ref.rootID() == taskID {
+		ref.SubmissionKey = ts.SubmissionKey
 	}
 	rec.Tasks = append(rec.Tasks, ref)
 	if ts.LinkParent {
