@@ -204,8 +204,8 @@ Process memory doesn't move, and the bus doesn't hold what nobody was subscribed
   `doortasks.<id>` index entry the record bounds, so `tasks/get`, `tasks/cancel` and a
   follow-up reach a task the old replica accepted. A task past that (out of its record's 50-task
   history, its session reaped, or its end off the stream) still reads as not found, with the reason `not-held-since-serving`, the new replica's `servingSince` and `mayHaveRun: true`. A send
-  retried with the same `messageId` is answered with the task the first attempt started, from a
-  hash of the caller and the `messageId` on the task's record entry; a steer retried across a
+  retried with the same `messageId` and text is answered with the task the first attempt
+  started, from a hash of the three on the task's record entry; a steer retried across a
   handover can still reach its running task twice. The inject door's transcripts are lost; that
   is a follow-up under #4206.
 

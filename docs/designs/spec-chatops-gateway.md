@@ -3503,12 +3503,17 @@ every message through either stamps its own backend.
   until the task's terminal, bounded, which is the one-call `curl` demo. `message.taskId` names
   a running task of the caller's own and lands the text on its conversation, where the gateway
   treats it as a steer. `message.messageId` is the dedupe key: a retry after a dropped
-  connection is answered with the task the first attempt started, and starts nothing. The key
-  lasts across a gateway handover too: the gateway stamps a hash of the caller and the
-  `messageId` on the task's entry in the conversation's record, and answers a repeat of it on
-  that conversation with the task, while the record lists it. A send that names a `messageId`
-  and no `contextId` is given a `contextId` derived from the caller and the `messageId`, so its
-  retry reaches the same conversation.
+  connection is answered with the task the first attempt started, and starts nothing. Across a
+  gateway handover this holds for a send whose first attempt started a task: the gateway stamps
+  a hash of the caller, the `messageId` and the text on the task's entry in the conversation's
+  record, and answers a repeat on that conversation with the task while the record lists it and
+  the task can still be read (a terminal on its stream, or still running). A retry of a turn
+  that started no task (a steer, a status answer, a refusal) runs again, and so does a retry of
+  a task that can't be read. A send that names a `messageId` and no `contextId` is given a
+  `contextId` derived from the same three, so its retry reaches the same conversation, while a
+  reused `messageId` with other text gets a conversation of its own. On one gateway a
+  `messageId` reused on another context is refused; across a handover it starts a new task,
+  since the record that would refuse it is the other context's.
 - `tasks/get` returns the `Task` as the door holds it. Scoped to the caller: a task another
   caller started is not found rather than forbidden, so the door confirms no id it will not
   serve. A task the door doesn't hold in memory (after a gateway restart, a failover to

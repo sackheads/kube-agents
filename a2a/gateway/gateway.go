@@ -1365,7 +1365,7 @@ func (g *Gateway) runTurn(ctx context.Context, msg InboundMessage, backend, prin
 	if taskID := g.matchSubmission(ctx, msg); taskID != "" {
 		g.log.Info("turn repeats a submission the record holds; answered with its task",
 			"conversation", msg.Conversation, "messageId", msg.MessageID, "taskId", taskID)
-		g.observeSubmissionMatched(msg.Conversation, taskID)
+		g.observeSubmissionMatched(ctx, msg.Conversation, taskID)
 		return
 	}
 	g.routeTurn(ctx, msg, backend, principal)
@@ -1374,9 +1374,14 @@ func (g *Gateway) runTurn(ctx context.Context, msg InboundMessage, backend, prin
 // matchSubmission is the task the conversation's record holds for the
 // turn's submission key, or "": the dedupe that survives a handover. Run
 // under the session lock, so a repeat racing its first attempt waits for
-// that attempt's record write and finds its entry. A record that can't be
-// read is no match: the turn goes on as it would have before the key
-// existed.
+// that attempt's record write and finds its entry.
+//
+// A match counts only when the task can be answered, by the door's own rule
+// (recoverTask): a terminal on its stream, or still the record's active
+// task. A task whose publish failed has neither, nor has one whose end has
+// left the stream, and a retry of it goes on as a new turn, as it did before
+// the key existed, rather than ending on an answer no retry could change. A
+// record or stream that can't be read is no match either.
 func (g *Gateway) matchSubmission(ctx context.Context, msg InboundMessage) string {
 	if msg.SubmissionKey == "" {
 		return ""
@@ -1386,18 +1391,25 @@ func (g *Gateway) matchSubmission(ctx context.Context, msg InboundMessage) strin
 		return ""
 	}
 	for _, ref := range rec.Tasks {
-		if ref.SubmissionKey == msg.SubmissionKey && ref.rootID() == ref.ID {
-			return ref.ID
+		if ref.SubmissionKey != msg.SubmissionKey || ref.rootID() != ref.ID {
+			continue
 		}
+		st, err := g.probeConversation(ctx, msg.Conversation, ref.ID)
+		if err != nil || !(st.Final || (st.Active && st.TaskID == ref.ID)) {
+			g.log.Info("turn repeats a submission whose task can't be answered; taking it as a new turn",
+				"conversation", msg.Conversation, "taskId", ref.ID, "err", err)
+			return ""
+		}
+		return ref.ID
 	}
 	return ""
 }
 
 // observeSubmissionMatched tells a SubmissionObserver that a turn repeated a
 // submission the record holds.
-func (g *Gateway) observeSubmissionMatched(conversation, taskID string) {
+func (g *Gateway) observeSubmissionMatched(ctx context.Context, conversation, taskID string) {
 	if observer, ok := g.adapter.(SubmissionObserver); ok {
-		observer.SubmissionMatched(conversation, taskID)
+		observer.SubmissionMatched(ctx, conversation, taskID)
 	}
 }
 

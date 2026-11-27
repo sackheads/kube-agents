@@ -35,7 +35,7 @@ type InboundMessage struct {
 	// correlationId -> every hop -> change.
 	MessageID string
 	// SubmissionKey, set by the A2A door on a send that names a messageId,
-	// is a hash of the caller and that id (a2aSubmissionKey). The gateway
+	// is a hash of the caller, that id and the text (a2aSubmissionKey). The gateway
 	// stamps it on the task the turn starts (TaskRef.SubmissionKey) and
 	// answers a repeat of it on the conversation with that task instead of
 	// starting another (matchSubmission): the dedupe a gateway handover
@@ -631,9 +631,9 @@ type TaskLocator func(ctx context.Context, taskID string) (string, error)
 // SubmissionObserver is the optional extension a door implements to be told
 // that a turn repeats a submission the conversation's record already holds
 // (InboundMessage.SubmissionKey): the turn started nothing, and taskID is the
-// task the first attempt started.
+// task the first attempt started. ctx is the turn's.
 type SubmissionObserver interface {
-	SubmissionMatched(conversation, taskID string)
+	SubmissionMatched(ctx context.Context, conversation, taskID string)
 }
 
 // TaskLocatorSink is the optional extension a door implements to find a

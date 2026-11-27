@@ -80,7 +80,9 @@ const (
 	// gateway posts; a2aInboundIDPrefix the ids it mints for an inbound
 	// message a caller did not name (the protocol requires one, but the
 	// door would rather mint than refuse); a2aContextIDPrefix the context
-	// ids it mints when a caller starts a conversation without one.
+	// ids it gives a caller that starts a conversation without one: drawn,
+	// or derived from the send when it names a messageId
+	// (a2aDerivedContextID).
 	a2aMessageIDPrefix = "a2a-"
 	a2aInboundIDPrefix = "a2a-msg-"
 	a2aContextIDPrefix = "ctx-"
@@ -780,7 +782,7 @@ func (d *A2ADoor) send(r *http.Request, verified string, handler func(InboundMes
 			// Derived, not drawn: a retry of this send after a handover
 			// reaches the same conversation, whose record holds the task the
 			// first attempt started (a2aSubmissionKey).
-			contextID = a2aDerivedContextID(caller, messageID)
+			contextID = a2aDerivedContextID(caller, messageID, text)
 		} else {
 			contextID = a2aContextIDPrefix + randHex(messageIDHexWidth)
 		}
@@ -837,7 +839,7 @@ func (d *A2ADoor) send(r *http.Request, verified string, handler func(InboundMes
 		Text:          text,
 		Backend:       a2aBackendForCaller(caller),
 		TaskID:        msg.TaskID,
-		SubmissionKey: a2aSubmissionKey(caller, strings.TrimSpace(msg.MessageID)),
+		SubmissionKey: a2aSubmissionKey(caller, strings.TrimSpace(msg.MessageID), text),
 	})
 	taskID, reply, rerr := d.awaitTurn(turnCtx, key, prior, deadline)
 	d.completeOutcome(outcome, taskID, reply, rerr)
@@ -1631,11 +1633,11 @@ func (d *A2ADoor) rememberEvictedLocked(taskID, caller string) {
 // a2aNotHeldData is the data of a door not-found error: why the door
 // doesn't hold the task, when this gateway started serving the door, and
 // that the task's outcome is unknown here (MayHaveRun): a caller that
-// resubmits with a new messageId starts it again, possibly twice. The
-// door's messageId dedupe is in the same memory, so a repeated messageId
-// doesn't dedupe across a restart either; on the same gateway it still
-// names the original task, so reusing an evicted task's messageId doesn't
-// start a fresh run.
+// resubmits with a new messageId starts it again, possibly twice. A
+// repeated messageId names the original task on the same gateway, and
+// across a handover while the conversation's record lists the task
+// (matchSubmission); a task this answer is given for has left its record,
+// so a repeat of its messageId starts it again too.
 type a2aNotHeldData struct {
 	Reason       string `json:"reason"`
 	ServingSince string `json:"servingSince"`
@@ -1664,7 +1666,7 @@ func (d *A2ADoor) a2aTaskNotHeld(id json.RawMessage, taskID, caller string) rpcR
 		"; this gateway has served the A2A door since "+data.ServingSince+
 		", and no conversation of this caller's still lists the task: one that has left its conversation's record, or whose end is no longer on the bus, "+
 		"is unknown here and may have run or may still be running. "+
-		"Resubmitting starts it again, and a repeated messageId doesn't dedupe across a restart", data)
+		"Resubmitting starts it again, with a new messageId or the original one", data)
 }
 
 // CancelPublished records that a cancel reached the bus.
