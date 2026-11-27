@@ -708,7 +708,7 @@ type InjectAdapter struct {
 	// floors is where an evicted conversation stopped, by key, so a re-mint
 	// of the same key carries on from it: its sequence, or a poller following
 	// `after` across an eviction under its running task would have the
-	// relay's later posts, renumbered from 1, filtered out as already read;
+	// relay's later posts, renumbered from the serving base, filtered out as already read;
 	// and the turn it had handed over that had not ended, or that turn's end
 	// would count on the new incarnation as a turn it never handed over and
 	// the one-turn-at-a-time guard would admit two messages at once.
@@ -1353,6 +1353,8 @@ func countsOf(conv *injectConversation) injectCounts {
 		starts:           conv.started.total,
 		accepted:         conv.accepted.total,
 		publishFailed:    conv.publishFailed.total,
+		// The last sequence, not a count: numbering starts at the serving
+		// base (seqBase), and a wait compares it with a later reading.
 		entries:          conv.nextSeq - 1,
 		drops:            conv.drops,
 		turns:            conv.turns,
