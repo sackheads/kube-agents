@@ -203,10 +203,11 @@ Process memory doesn't move, and the bus doesn't hold what nobody was subscribed
   it doesn't hold from its conversation's session record and the task's stream, through a
   `doortasks.<id>` index entry the record bounds, so `tasks/get`, `tasks/cancel` and a
   follow-up reach a task the old replica accepted. A task past that (out of its record's 50-task
-  history, its session reaped, or its end off the stream) still reads as not found, with the reason `not-held-since-serving`, the new replica's `servingSince` and `mayHaveRun: true`. The
-  `messageId` dedupe doesn't survive a handover, so a client that resubmits should expect
-  possible duplicate work, and the inject door's transcripts are lost. Both are follow-ups
-  under #4206.
+  history, its session reaped, or its end off the stream) still reads as not found, with the reason `not-held-since-serving`, the new replica's `servingSince` and `mayHaveRun: true`. A send
+  retried with the same `messageId` is answered with the task the first attempt started, from a
+  hash of the caller and the `messageId` on the task's record entry; a steer retried across a
+  handover can still reach its running task twice. The inject door's transcripts are lost; that
+  is a follow-up under #4206.
 
 ### Reaching the active replica over HTTP
 
@@ -392,4 +393,4 @@ door conversations in KV. Fenced writes (step 1) are the one piece phase one alr
   task across a failover: a task the new active replica doesn't hold is reported with a reason,
   when that replica started serving, and `mayHaveRun: true`, because the task may have finished
   or may still be running (#5633). The new active replica now reads the task from its record and
-  stream while the record lists it; the rest of #4206 adds the dedupe and the inject door.
+  stream while the record lists it, and a retried send with the same `messageId` is answered with its first task; the rest of #4206 adds the inject door.

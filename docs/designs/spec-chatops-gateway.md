@@ -3503,7 +3503,12 @@ every message through either stamps its own backend.
   until the task's terminal, bounded, which is the one-call `curl` demo. `message.taskId` names
   a running task of the caller's own and lands the text on its conversation, where the gateway
   treats it as a steer. `message.messageId` is the dedupe key: a retry after a dropped
-  connection is answered with the task the first attempt started, and starts nothing.
+  connection is answered with the task the first attempt started, and starts nothing. The key
+  lasts across a gateway handover too: the gateway stamps a hash of the caller and the
+  `messageId` on the task's entry in the conversation's record, and answers a repeat of it on
+  that conversation with the task, while the record lists it. A send that names a `messageId`
+  and no `contextId` is given a `contextId` derived from the caller and the `messageId`, so its
+  retry reaches the same conversation.
 - `tasks/get` returns the `Task` as the door holds it. Scoped to the caller: a task another
   caller started is not found rather than forbidden, so the door confirms no id it will not
   serve. A task the door doesn't hold in memory (after a gateway restart, a failover to
@@ -3523,10 +3528,10 @@ every message through either stamps its own backend.
   for anything else: a task past the read above, the caller's own task evicted so long
   ago that the door no longer remembers it (it keeps 4096 such ids), and equally another caller's
   id or one no door minted, so the answer still confirms nothing. A client that resubmits with a
-  new `messageId` starts the task again and should expect possible duplicate work: the
-  `messageId` dedupe lives in the gateway's memory, so a repeated `messageId` doesn't dedupe across a
-  restart. On the same gateway a repeated `messageId` still names the original task, so
-  resubmitting an evicted task with its original `messageId` doesn't start a new run.
+  new `messageId` starts the task again and should expect possible duplicate work. A repeated
+  `messageId` names the original task, on the same gateway and across a handover while the
+  conversation's record lists the task, so resubmitting with the original `messageId` doesn't
+  start a new run.
 - `tasks/cancel` is a cancel turn on the task's conversation - the same `kind: cancel` envelope
   the inject door's cancel route and the chat path's `stop` publish - answered once the cancel is
   on the bus (`TaskObserver.CancelPublished`) with the `Task` as it stands. The executor decides
