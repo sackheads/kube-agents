@@ -283,7 +283,7 @@ func (k *kanbanTracker) ensureMapsLocked() {
 func cardStep(c kanbanCardRow, settled, total int, parentTaskID string) stepmsg.Step {
 	// The title is model-written too (the coordinator names the card when it
 	// files it), so it passes the scrubber as a net, like an argument value.
-	title := answerscrub.ScrubInline(strings.TrimSpace(c.Title))
+	title := titleText(c.Title)
 	shortTitle := shortCardClusterOrTitle(title)
 	if shortTitle == "" {
 		shortTitle = c.ID
@@ -702,7 +702,7 @@ func cardAnswerText(c kanbanCardRow) string {
 			return out
 		}
 	}
-	title := shortCardClusterOrTitle(answerscrub.ScrubInline(strings.TrimSpace(c.Title)))
+	title := shortCardClusterOrTitle(titleText(c.Title))
 	if title == "" {
 		return fmt.Sprintf("Kanban card `%s` finished with status `%s`.", c.ID, st)
 	}

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/gke-labs/kube-agents/a2a/lib/answerscrub"
@@ -164,7 +165,7 @@ func (a *activityState) SyncKanbanCard(cardID, title, workerSessionID string) {
 	workerSessionID = strings.TrimSpace(workerSessionID)
 	if cardID != "" && title != "" {
 		// kanban.db's title is model-written: scrubbed, as at kanban_create.
-		a.trace.cardTitles[cardID] = shortCardClusterOrTitle(answerscrub.ScrubInline(title))
+		a.trace.cardTitles[cardID] = shortCardClusterOrTitle(titleText(title))
 	}
 	if workerSessionID != "" && cardID != "" {
 		a.trace.sessionCards[workerSessionID] = cardID
@@ -224,7 +225,7 @@ func (a *activityState) observeWorkerContextLocked(d hookDelivery, rawInput json
 		// with no title.
 		if kanbanCardIDFromJSON(d.Extra.Result) == createdCardID {
 			a.trace.filedCards[createdCardID] = true
-			if short := shortCardClusterOrTitle(answerscrub.ScrubInline(extractArgStr(parsed, "title"))); short != "" {
+			if short := shortCardClusterOrTitle(extractArgStr(parsed, "title")); short != "" {
 				a.trace.cardTitles[createdCardID] = short
 			}
 		}
@@ -693,11 +694,35 @@ func extractArgStr(m map[string]any, keys ...string) string {
 		if v, ok := m[k].(string); ok {
 			v = strings.TrimSpace(v)
 			if v != "" && v != redactedValue && !strings.HasPrefix(v, "<string,") {
-				return answerscrub.ScrubInline(v)
+				if t := titleText(v); t != "" {
+					return t
+				}
 			}
 		}
 	}
 	return ""
+}
+
+// titleText is model-written text as a step title carries it: any space
+// character as a plain space, other non-printing characters (line breaks,
+// escape sequences, bidirectional overrides, zero-width characters, U+FFFD)
+// dropped, then scrubbed. The characters go first, so the scrub sees a
+// secret one of them split. Callers cap the result after (capRunes), so a
+// cap can't cut a secret the scrub would have recognised whole. Empty when
+// nothing printable is left.
+func titleText(s string) string {
+	s = strings.Map(func(r rune) rune {
+		switch {
+		case r == utf8.RuneError:
+			return -1
+		case unicode.Is(unicode.Zs, r):
+			return ' '
+		case !unicode.IsPrint(r):
+			return -1
+		}
+		return r
+	}, s)
+	return answerscrub.ScrubInline(strings.TrimSpace(s))
 }
 
 func shortClusterRef(raw string) string {
