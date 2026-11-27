@@ -142,9 +142,8 @@ func (a *InjectAdapter) recoverConversation(ctx context.Context, key string) boo
 	if !held {
 		conv = a.conversationLocked(key)
 	}
-	if conv.recovered {
-		return true
-	}
+	// No one else rebuilt it meanwhile: recovering admits one rebuild per
+	// key, and only a rebuild marks it.
 	conv.recovered = true
 	for _, task := range found {
 		a.restoreTaskLocked(conv, task)

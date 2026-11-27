@@ -33,8 +33,8 @@ The code assumes one process in four places, each of which would misbehave on it
   conversation lock).
 
 The HTTP doors (inject and A2A) keep their conversations in memory too, so a request and its
-follow-up have to reach the same replica. (The A2A door reads a task back from its record after
-a handover, but not a turn in flight.)
+follow-up have to reach the same replica. (Both doors read a conversation back from its record
+after a handover, but not a turn in flight.)
 
 ## Decision: active-standby first
 
@@ -206,8 +206,15 @@ Process memory doesn't move, and the bus doesn't hold what nobody was subscribed
   history, its session reaped, or its end off the stream) still reads as not found, with the reason `not-held-since-serving`, the new replica's `servingSince` and `mayHaveRun: true`. A send
   retried with the same `messageId` and text is answered with the task the first attempt
   started, from a hash of the three on the task's record entry; a steer retried across a
-  handover can still reach its running task twice. The inject door's transcripts are lost; that
-  is a follow-up under #4206.
+  handover can still reach its running task twice. The inject door rebuilds a conversation it
+  doesn't hold from the same record and streams: a task entry for each task the door started,
+  and for each that has ended, its result and its terminal. A task with no terminal on its stream
+  that isn't the record's active task is left out rather than shown running. The posts and edits
+  the old replica made aren't rebuilt. Each conversation's entries are numbered from the
+  replica's serving start in Unix milliseconds, and its message ids count on from the same base,
+  so a caller's `after` cursor from the old replica reads on with no client change. A POST
+  retried with the same `messageId` is answered with the first task, from a hash over the
+  conversation, the id, the intent, the profile and the text.
 
 ### Reaching the active replica over HTTP
 
@@ -393,4 +400,4 @@ door conversations in KV. Fenced writes (step 1) are the one piece phase one alr
   task across a failover: a task the new active replica doesn't hold is reported with a reason,
   when that replica started serving, and `mayHaveRun: true`, because the task may have finished
   or may still be running (#5633). The new active replica now reads the task from its record and
-  stream while the record lists it, and a retried send with the same `messageId` is answered with its first task; the rest of #4206 adds the inject door.
+  stream while the record lists it, and a retried send with the same `messageId` is answered with its first task. The inject door does the same for its conversations (#7456).
