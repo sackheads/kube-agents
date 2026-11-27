@@ -55,10 +55,15 @@ func (a *InjectAdapter) SubmissionMatched(_ context.Context, conversation, taskI
 }
 
 // injectRecoveredTask is one task a rebuild found answerable, with what the
-// probe read for it.
+// probe read for it. ended is whether the rebuild shows its end: a terminal
+// on the stream of a task the record no longer holds as active. A task the
+// record still holds is running to the door even with a terminal on its
+// stream, because the relay releases the record before it acks the
+// terminal: that terminal is unrendered, and the relay renders it.
 type injectRecoveredTask struct {
-	id string
-	st ConversationState
+	id    string
+	st    ConversationState
+	ended bool
 }
 
 // recoverConversation rebuilds a conversation this door doesn't hold from
@@ -71,11 +76,15 @@ type injectRecoveredTask struct {
 // Posts and edits the earlier gateway made aren't rebuilt: the stream holds
 // none of them.
 //
-// A pure read of the bus, outside a.mu, and once per minting of the key:
-// a conversation already rebuilt, or minted by a POST that had just
-// rebuilt it, is left alone, and a request racing another's rebuild of the
-// key waits for it. A conversation this door minted meanwhile (the relay
-// posting into it) is kept, and the rebuild adds only what it lacks.
+// A pure read of the bus, outside a.mu and bounded by probeTimeout, and
+// once per key while the door serves: a conversation already rebuilt
+// (carried across an eviction by its floor), minted by a POST that had just
+// rebuilt it, or found to have nothing to rebuild (settled) is left alone,
+// and a request racing another's rebuild of the key waits for it. A
+// conversation in which this door has already seen a task start is left as
+// it is, so old tasks never land after a live one. One the door minted
+// otherwise meanwhile (the relay posting into it) is kept, and the rebuild
+// adds only what it lacks.
 //
 // True when the key needs nothing more: rebuilt, or no record to rebuild
 // from. False when the read failed or the door has no source, so a later
@@ -86,6 +95,16 @@ func (a *InjectAdapter) recoverConversation(ctx context.Context, key string) boo
 	}
 	a.mu.Lock()
 	if conv, ok := a.conversations[key]; ok && conv.recovered {
+		a.mu.Unlock()
+		return true
+	}
+	if _, ok := a.settled[key]; ok {
+		a.mu.Unlock()
+		return true
+	}
+	if _, held := a.conversations[key]; !held && a.floorLocked(key).recovered {
+		// Rebuilt before an eviction: a re-mint carries on from the floor
+		// with nothing replayed.
 		a.mu.Unlock()
 		return true
 	}
@@ -112,6 +131,8 @@ func (a *InjectAdapter) recoverConversation(ctx context.Context, key string) boo
 		close(done)
 	}()
 
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
 	ids, err := tasks(ctx, key)
 	if err != nil {
 		a.log.Warn("inject: could not read the session record of a conversation the door doesn't hold",
@@ -126,8 +147,11 @@ func (a *InjectAdapter) recoverConversation(ctx context.Context, key string) boo
 				"conversation", key, "taskId", id, "err", err)
 			return false
 		}
-		if st.Final || (st.Active && st.TaskID == id) {
+		switch {
+		case st.Active && st.TaskID == id:
 			found = append(found, injectRecoveredTask{id: id, st: st})
+		case st.Final:
+			found = append(found, injectRecoveredTask{id: id, st: st, ended: true})
 		}
 	}
 
@@ -136,14 +160,22 @@ func (a *InjectAdapter) recoverConversation(ctx context.Context, key string) boo
 	conv, held := a.conversations[key]
 	if !held && len(found) == 0 {
 		// Nothing to show: no conversation is minted, and the read answers
-		// as it always has for a key the door doesn't hold.
+		// as it always has for a key the door doesn't hold. Settled, so the
+		// next poll doesn't read again: only this door starts tasks on the
+		// key while it serves, and a POST that does mints the conversation.
+		a.settleLocked(key)
+		return true
+	}
+	if held && conv.started.total > 0 {
+		// The door has seen a task start here since it began serving: the
+		// transcript is its own, and an old task appended now would land
+		// after the live one.
+		conv.recovered = true
 		return true
 	}
 	if !held {
 		conv = a.conversationLocked(key)
 	}
-	// No one else rebuilt it meanwhile: recovering admits one rebuild per
-	// key, and only a rebuild marks it.
 	conv.recovered = true
 	for _, task := range found {
 		a.restoreTaskLocked(conv, task)
@@ -164,7 +196,7 @@ func (a *InjectAdapter) restoreTaskLocked(conv *injectConversation, task injectR
 	if !ended && !conv.hasTaskEntry(task.id) {
 		a.appendLocked(conv, InjectEntry{Kind: InjectEntryTask, TaskID: task.id, Recovered: true})
 	}
-	if ended || !task.st.Final {
+	if ended || !task.ended {
 		return
 	}
 	state := task.st.ExecutorState
@@ -184,6 +216,20 @@ func (a *InjectAdapter) restoreTaskLocked(conv *injectConversation, task injectR
 		Source: string(task.st.TerminalSource), Reason: truncateRunes(task.st.Reason, injectMaxEntryBytes),
 		Recovered: true,
 	})
+}
+
+// settleLocked records that key has nothing to rebuild, bounded at
+// injectFloorCap oldest first. Caller holds a.mu.
+func (a *InjectAdapter) settleLocked(key string) {
+	if _, ok := a.settled[key]; ok {
+		return
+	}
+	a.settled[key] = struct{}{}
+	a.settledOrder = append(a.settledOrder, key)
+	for len(a.settledOrder) > injectFloorCap {
+		delete(a.settled, a.settledOrder[0])
+		a.settledOrder = a.settledOrder[1:]
+	}
 }
 
 // hasTaskEntry reports whether the transcript still holds a task entry for

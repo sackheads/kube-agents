@@ -745,10 +745,20 @@ type InjectAdapter struct {
 	// recovering holds a channel per key whose rebuild is under way, closed
 	// when it ends, so two requests racing on one key don't both rebuild.
 	recovering map[string]chan struct{}
+	// settled is the keys a rebuild found nothing for (no record, or no
+	// task it could show), so a poll loop on one doesn't read the bus on
+	// every request; settledOrder bounds it at injectFloorCap.
+	settled      map[string]struct{}
+	settledOrder []string
 	// seqBase is the sequence a conversation minted with no floor starts
 	// at: the door's serving start in Unix milliseconds, set by Run and
 	// never lowered (InjectEntry.Seq). Zero before Run, so a door outside a
-	// gateway numbers from 1. Run starts nextID's count there too.
+	// gateway numbers from 1. Run starts nextID's count there too. A cursor
+	// from an earlier gateway stays below it while that gateway wrote fewer
+	// entries on the conversation than the milliseconds between the two
+	// serving starts, and the pods' clocks agree to well within that: a
+	// handover takes seconds, and one conversation's entries arrive far
+	// slower than one a millisecond.
 	seqBase int
 
 	// listener, when set, is an already-bound listener Run serves on instead
@@ -785,6 +795,7 @@ func NewInjectAdapter(listen, token string, firstEventGrace time.Duration, log *
 		floors:          map[string]injectFloor{},
 		submissions:     map[string]*injectSubmission{},
 		recovering:      map[string]chan struct{}{},
+		settled:         map[string]struct{}{},
 		notify:          make(chan struct{}),
 	}, nil
 }
@@ -1226,13 +1237,14 @@ func (a *InjectAdapter) conversationLocked(key string) *injectConversation {
 			a.rememberFloorLocked(oldest, injectFloor{
 				nextSeq:     evicted.nextSeq,
 				outstanding: max(0, evicted.handed-evicted.turns),
+				recovered:   evicted.recovered,
 			})
 		}
 		delete(a.conversations, oldest)
 	}
 	a.mints++
 	floor := a.floorLocked(key)
-	conv := &injectConversation{nextSeq: floor.nextSeq, handed: floor.outstanding, terminals: map[string]string{}, gen: a.mints}
+	conv := &injectConversation{nextSeq: floor.nextSeq, handed: floor.outstanding, terminals: map[string]string{}, gen: a.mints, recovered: floor.recovered}
 	a.conversations[key] = conv
 	a.order = append(a.order, key)
 	return conv
@@ -1246,6 +1258,9 @@ func (a *InjectAdapter) conversationLocked(key string) *injectConversation {
 type injectFloor struct {
 	nextSeq     int
 	outstanding int
+	// recovered carries injectConversation.recovered, so a re-mint isn't
+	// rebuilt again: its old tasks would replay above the floor.
+	recovered bool
 }
 
 // rememberFloorLocked records where an evicted conversation stopped, bounded

@@ -2150,6 +2150,14 @@ class InjectTask:
         last_seq = body.get("lastSeq")
         if isinstance(last_seq, int) and last_seq > after:
             after = last_seq
+        elif isinstance(last_seq, int) and last_seq < after:
+            # The door's numbering restarted below the cursor: a gateway
+            # rolled back to one that numbers each conversation from 1, or
+            # that no longer holds it. Its entries are all new to this
+            # reader, so read from the start rather than filter them all
+            # out as seen. A door that numbers from its serving start never
+            # answers below a cursor it issued (#7456).
+            after = 0
         # The terminal is answered out of band as well as in the entries, so
         # a reader that arrived after the event still learns it rather than
         # waiting for one that has been and gone.

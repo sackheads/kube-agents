@@ -2,8 +2,10 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -256,6 +258,7 @@ func TestRacingReadsRebuildAnInjectConversationOnce(t *testing.T) {
 	reply, _ := finishedConversation(t, before, "case-racing-reads", "how is the fleet?", "", "all green")
 
 	after := handOverInject(t, before)
+	reads := countRecordReads(after)
 	var wg sync.WaitGroup
 	for range 4 {
 		wg.Add(1)
@@ -277,6 +280,9 @@ func TestRacingReadsRebuildAnInjectConversationOnce(t *testing.T) {
 	}
 	if tasks != 1 || terms != 1 {
 		t.Errorf("entries = %+v, want one task entry and one terminal", entries)
+	}
+	if n := reads.Load(); n != 1 {
+		t.Errorf("the record was read %d times, want once: the rebuild isn't guarded per key", n)
 	}
 }
 
@@ -324,5 +330,136 @@ func TestConversationTasksAnswersOnlyADoorSessionsOwnRoots(t *testing.T) {
 	}
 	if r.adapter.recoverConversation(ctx, a2aConversationKey(a2aTestCaller, "ctx-1")) {
 		t.Error("the inject door's rebuild took an A2A conversation's key")
+	}
+}
+
+// countRecordReads wraps the door's ConversationTasks so a test can count
+// the record reads a rebuild makes.
+func countRecordReads(r *injectRig) *atomic.Int32 {
+	var n atomic.Int32
+	r.adapter.mu.Lock()
+	defer r.adapter.mu.Unlock()
+	inner := r.adapter.tasks
+	r.adapter.tasks = func(ctx context.Context, conversation string) ([]string, error) {
+		n.Add(1)
+		return inner(ctx, conversation)
+	}
+	return &n
+}
+
+// A task whose terminal reached the stream while the old gateway was down
+// is still the record's active task: its end is unrendered, and the next
+// gateway's relay renders it. The rebuild shows it running and leaves the
+// end to the relay, so the transcript carries one result and one terminal.
+func TestAnInjectTaskThatEndedUnrenderedAtAHandoverHasOneTerminal(t *testing.T) {
+	t.Parallel()
+	before := startInjectRig(t)
+	reply := before.inject(t, "case-unrendered-end", injectTestAuthor, "how is the fleet?")
+	if reply.TaskID == "" {
+		t.Fatalf("POST started nothing: %+v", reply)
+	}
+	origin := before.awaitTask(t, "platform")
+	before.awaitRecordedTask(t, reply.Conversation)
+
+	after := handOverInject(t, before, func() { completeInject(t, before, origin, "all green") })
+	after.conversation(t, reply.Conversation, 0, "", 0)
+	after.waitForTerminal(t, reply.Conversation, reply.TaskID)
+	after.awaitRecordRelease(t, reply.Conversation)
+	entries, _, _ := after.adapter.snapshot(reply.Conversation, 0, "")
+	if terms := terminalEntries(entries); len(terms) != 1 {
+		t.Errorf("terminals = %+v, want one", terms)
+	}
+	var results int
+	for _, text := range entryTexts(entries, InjectEntryPost) {
+		if text == "all green" {
+			results++
+		}
+	}
+	if results != 1 {
+		t.Errorf("the result is posted %d times, want once: %+v", results, entries)
+	}
+}
+
+// A conversation in which the door has seen a task start since it began
+// serving (a queued turn redelivered, say) is its own: the rebuild leaves
+// it alone, so an old task never lands after the live one.
+func TestARebuildLeavesAConversationWithALiveTaskAlone(t *testing.T) {
+	t.Parallel()
+	before := startInjectRig(t)
+	reply, _ := finishedConversation(t, before, "case-live-first", "how is the fleet?", "", "all green")
+
+	after := handOverInject(t, before)
+	after.adapter.TaskStarted(reply.Conversation, "task-00000000000000cc")
+	page := after.conversation(t, reply.Conversation, 0, "", 0)
+	if len(page.Entries) != 1 || page.Entries[0].TaskID != "task-00000000000000cc" {
+		t.Errorf("entries = %+v, want the live task's entry alone", page.Entries)
+	}
+}
+
+// A rebuilt conversation evicted at the conversation cap and minted again
+// isn't rebuilt a second time: its old tasks would replay above the floor.
+func TestARebuiltInjectConversationIsNotRebuiltAgainAfterAnEviction(t *testing.T) {
+	t.Parallel()
+	before := startInjectRig(t)
+	reply, _ := finishedConversation(t, before, "case-evicted-rebuilt", "how is the fleet?", "", "all green")
+
+	after := handOverInject(t, before)
+	first := after.conversation(t, reply.Conversation, 0, "", 0)
+	if len(first.Entries) == 0 {
+		t.Fatal("the conversation wasn't rebuilt")
+	}
+	for i := range injectMaxConversations {
+		if _, err := after.adapter.Post(fmt.Sprintf("%sfiller-%d", injectKeyPrefix, i), "filler"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	again := after.conversation(t, reply.Conversation, first.LastSeq, "", 0)
+	if len(again.Entries) != 0 {
+		t.Errorf("after an eviction the conversation replayed %+v", again.Entries)
+	}
+}
+
+// A key with nothing to rebuild is read once, not on every poll.
+func TestAnInjectKeyWithNothingToRebuildIsReadOnce(t *testing.T) {
+	t.Parallel()
+	r := startInjectRig(t)
+	ctx := context.Background()
+	key := injectKeyPrefix + "case-settled"
+	rec := doorRecord(key, "task-00000000000000dd")
+	rec.Kind = injectConversationKind
+	if err := r.g.reg.Put(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	reads := countRecordReads(r)
+	for range 3 {
+		r.conversation(t, key, 0, "", 0)
+	}
+	r.conversation(t, injectKeyPrefix+"case-no-record", 0, "", 0)
+	r.conversation(t, injectKeyPrefix+"case-no-record", 0, "", 0)
+	if n := reads.Load(); n != 2 {
+		t.Errorf("the record was read %d times over five polls of two keys, want once per key", n)
+	}
+}
+
+// A retry that arrives while the first attempt's task is still running is
+// answered with that task too: the record holds it as active.
+func TestARepeatedInjectPostIsAnsweredWithItsRunningTaskAcrossAHandover(t *testing.T) {
+	t.Parallel()
+	before := startInjectRig(t)
+	const messageID = "run-1/case-running-dedupe/1"
+	first := before.injectWithID(t, "case-running-dedupe", injectTestAuthor, "how is the fleet?", messageID)
+	if first.TaskID == "" {
+		t.Fatalf("POST started nothing: %+v", first)
+	}
+	before.awaitTask(t, "platform")
+	before.awaitRecordedTask(t, first.Conversation)
+
+	after := handOverInject(t, before)
+	retry := after.injectWithID(t, "case-running-dedupe", injectTestAuthor, "how is the fleet?", messageID)
+	if retry.TaskID != first.TaskID || !retry.Accepted || !retry.Deduplicated {
+		t.Fatalf("retry = %+v, want the running task %s, accepted and deduplicated", retry, first.TaskID)
+	}
+	if n := len(inSubjectEnvelopes(t, after.url, "platform")); n != 1 {
+		t.Fatalf("%d envelopes on the in subject, want the first submission alone", n)
 	}
 }

@@ -755,6 +755,44 @@ def test_a_transcript_rebuilt_by_the_next_gateway_is_read_on_from_the_old_cursor
     assert not result.errors
 
 
+def test_a_door_whose_numbering_restarted_below_the_cursor_is_read_from_the_start(
+    stub_gateway: _StubGatewayServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rollback mid-task: the harness holds a cursor from a gateway that
+    numbered from its serving start, and the older gateway it now reaches
+    numbers from 1. Its lastSeq answers below the cursor, and the harness
+    reads from the start instead of filtering every new entry out."""
+    base = 1_795_000_000_000
+    stub_gateway.entries = [
+        entry(base, inject.ENTRY_TASK, taskId=stub_gateway.task_id),
+        entry(base + 1, inject.ENTRY_POST, text=PLACEHOLDER, messageId=PLACEHOLDER_ID),
+    ]
+    stub_gateway.on_finish = []
+    stub_gateway.finish_after_active_reads = 1
+    rolled_back = [
+        entry(1, inject.ENTRY_POST, text="read from the start", messageId="inj-7"),
+        entry(2, inject.ENTRY_TERMINAL, taskId=stub_gateway.task_id, state="completed",
+              source=inject.TERMINAL_SOURCE_EXECUTOR),
+    ]
+    original = stub_gateway.probe_report
+
+    def roll_back(task: str = "", chain: bool = False) -> dict[str, Any]:
+        if stub_gateway.active_reads >= 1 and stub_gateway.entries[0]["seq"] == base:
+            stub_gateway.entries = rolled_back
+        return original(task, chain)
+
+    stub_gateway.probe_report = roll_back  # type: ignore[method-assign]
+    # A short budget, so a harness that filters the new entries out fails
+    # at its deadline rather than hanging the suite.
+    monkeypatch.setenv("AGENT_INJECT_TIMEOUT", "4")
+
+    result = KubeAgentsHarness().run("across a rollback")
+
+    assert result.metadata["terminal_state"] == "completed"
+    assert "read from the start" in result.output
+    assert not result.errors
+
+
 def test_the_record_carries_the_lifecycle_as_status_events(
     stub_gateway: _StubGatewayServer,
 ) -> None:
