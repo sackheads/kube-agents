@@ -1350,9 +1350,9 @@ type injectCounts struct {
 // countsOf reads a conversation's counts. Caller holds a.mu.
 func countsOf(conv *injectConversation) injectCounts {
 	return injectCounts{
-		starts:           conv.started.total,
-		accepted:         conv.accepted.total,
-		publishFailed:    conv.publishFailed.total,
+		starts:        conv.started.total,
+		accepted:      conv.accepted.total,
+		publishFailed: conv.publishFailed.total,
 		// The last sequence, not a count: numbering starts at the serving
 		// base (seqBase), and a wait compares it with a later reading.
 		entries:          conv.nextSeq - 1,
