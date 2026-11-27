@@ -642,6 +642,25 @@ type TaskLocatorSink interface {
 	SetTaskLocator(TaskLocator)
 }
 
+// ConversationTasks answers which tasks a door conversation's record holds
+// that a door may answer for: its chain roots (doorVisible), oldest first.
+// Nothing when there is no record, or when conversation is not a door
+// session's key, so a door can't read a chat conversation's tasks through
+// it. A PURE READ, one KV get: it takes no session lock and writes nothing.
+//
+// It is how a door rebuilds a conversation it didn't hold, as after a
+// gateway handover (#7456): the inject door's conversation key is the
+// session key, so it needs the record's task list, not a task's location
+// (TaskLocator).
+type ConversationTasks func(ctx context.Context, conversation string) ([]string, error)
+
+// ConversationTasksSink is the optional extension a door implements to
+// receive the gateway's ConversationTasks. Wired in New the way
+// TaskLocatorSink is.
+type ConversationTasksSink interface {
+	SetConversationTasks(ConversationTasks)
+}
+
 // SessionLookup answers whether the gateway has started a task in a
 // conversation and the session is not idle past the idle TTL, and, with a
 // true, the moment that answer stops being trustworthy. A running task

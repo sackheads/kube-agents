@@ -90,7 +90,7 @@ func TestSideDoorRosterAsksTheRightBackend(t *testing.T) {
 	if _, err := door.Post(doorKey, "seed"); err != nil {
 		t.Fatal(err)
 	}
-	door.noteRequester(doorKey, "devops-bench")
+	door.noteRequester(doorKey, "devops-bench", false)
 
 	ids, complete, err := composite.Roster(doorKey)
 	if err != nil {

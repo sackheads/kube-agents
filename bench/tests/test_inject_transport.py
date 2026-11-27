@@ -728,6 +728,33 @@ def test_a_terminal_reported_out_of_band_is_still_seen(stub_gateway: _StubGatewa
     assert result.output == "answered before you looked"
 
 
+def test_a_transcript_rebuilt_by_the_next_gateway_is_read_on_from_the_old_cursor(
+    stub_gateway: _StubGatewayServer,
+) -> None:
+    """A gateway handover mid-task: the next gateway rebuilds the
+    conversation from its session record and numbers it from its serving
+    start in milliseconds (#7456). The cursor the harness carried from the
+    first gateway sits far below that, so it reads on to the answer with no
+    change on this side."""
+    base = 1_795_000_000_000
+    stub_gateway.entries = running_transcript(stub_gateway.task_id)
+    stub_gateway.on_finish = [
+        entry(base, inject.ENTRY_TASK, taskId=stub_gateway.task_id, recovered=True),
+        # The next gateway mints message ids from its serving base too, so
+        # none collides with a post the first gateway made and edited.
+        entry(base + 1, inject.ENTRY_POST, text="read on after the handover", messageId=f"inj-{base + 1}", recovered=True),
+        entry(base + 2, inject.ENTRY_TERMINAL, taskId=stub_gateway.task_id, state="completed",
+              source=inject.TERMINAL_SOURCE_EXECUTOR, recovered=True),
+    ]
+    stub_gateway.finish_after_active_reads = 1
+
+    result = KubeAgentsHarness().run("across a handover")
+
+    assert result.metadata["terminal_state"] == "completed"
+    assert result.output == "read on after the handover"
+    assert not result.errors
+
+
 def test_the_record_carries_the_lifecycle_as_status_events(
     stub_gateway: _StubGatewayServer,
 ) -> None:

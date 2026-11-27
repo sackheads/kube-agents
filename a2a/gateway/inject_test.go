@@ -68,6 +68,10 @@ type injectRig struct {
 	bus     *lib.Client
 	url     string
 	base    string
+	// stop ends the gateway's Run, and ran is closed once it has returned,
+	// for a test that hands the door to a fresh gateway (handOverInject).
+	stop func()
+	ran  chan struct{}
 }
 
 // startInjectRig assembles a gateway on an embedded server with the inject
@@ -88,9 +92,19 @@ func startInjectRigWith(t *testing.T, tweak func(*Config)) *injectRig {
 // spawn when it is not nil, for the door's turns on the session route.
 func startInjectRigSpawning(t *testing.T, tweak func(*Config), spawn *fakeSpawner) *injectRig {
 	t.Helper()
-	s := startServer(t)
-	url := s.ClientURL()
-	provision(t, url)
+	return startInjectRigOn(t, "", tweak, spawn)
+}
+
+// startInjectRigOn is startInjectRigSpawning on the server at url, or on a
+// fresh one when url is "": a second gateway on the first one's bus is how a
+// test hands the door over (handOverInject).
+func startInjectRigOn(t *testing.T, url string, tweak func(*Config), spawn *fakeSpawner) *injectRig {
+	t.Helper()
+	if url == "" {
+		s := startServer(t)
+		url = s.ClientURL()
+		provision(t, url)
+	}
 
 	// The door's own map, keys prefixed: the lookup is
 	// injectPrincipalPrefix + author, so an unprefixed entry is unreachable
@@ -154,7 +168,11 @@ func startInjectRigSpawning(t *testing.T, tweak func(*Config), spawn *fakeSpawne
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	go func() { _ = g.Run(ctx) }()
+	ran := make(chan struct{})
+	go func() {
+		defer close(ran)
+		_ = g.Run(ctx)
+	}()
 
 	rig := &injectRig{
 		g:       g,
@@ -162,6 +180,8 @@ func startInjectRigSpawning(t *testing.T, tweak func(*Config), spawn *fakeSpawne
 		bus:     bus,
 		url:     url,
 		base:    "http://" + ln.Addr().String(),
+		stop:    cancel,
+		ran:     ran,
 	}
 	// The listener is bound already, so the only race is Run installing the
 	// handler; a POST before that is refused with 503 by design.
@@ -671,9 +691,18 @@ func TestInjectEntriesArePollableWithoutGapsOrRepeats(t *testing.T) {
 	if len(seqs) == 0 {
 		t.Fatal("the conversation is empty")
 	}
+	// Dense from the door's serving base, not from 1: a conversation minted
+	// while the door serves starts at its serving start in milliseconds
+	// (InjectEntry.Seq, #7456).
+	r.adapter.mu.Lock()
+	base := r.adapter.seqBase
+	r.adapter.mu.Unlock()
+	if base < 2 {
+		t.Fatalf("the serving door's sequence base is %d, want its serving start in milliseconds", base)
+	}
 	for i, seq := range seqs {
-		if seq != i+1 {
-			t.Fatalf("sequence %d of the poll is %d; the numbering must be dense and start at 1: %v", i, seq, seqs)
+		if seq != base+i {
+			t.Fatalf("sequence %d of the poll is %d; the numbering must be dense from the serving base %d: %v", i, seq, base, seqs)
 		}
 	}
 }
@@ -3572,8 +3601,8 @@ func TestInjectACancelIsHandedOverAfterItsClientLeft(t *testing.T) {
 func TestInjectEvictionDropsEveryAuthorsMappingToTheConversation(t *testing.T) {
 	f := startFakeDoor(t, func(InboundMessage) {})
 	const key = injectKeyPrefix + "two-authors"
-	f.door.noteRequester(key, "author-a")
-	f.door.noteRequester(key, "author-b")
+	f.door.noteRequester(key, "author-a", false)
+	f.door.noteRequester(key, "author-b", false)
 	f.evictEverything(t, "two-authors")
 	f.door.mu.Lock()
 	defer f.door.mu.Unlock()
@@ -3598,7 +3627,7 @@ func TestInjectDirectOfIsCappedAcrossDistinctAuthors(t *testing.T) {
 	const key = injectKeyPrefix + "many-authors"
 	const over = 3
 	for i := range injectMaxDirectAuthors + over {
-		f.door.noteRequester(key, fmt.Sprintf("author-%d", i))
+		f.door.noteRequester(key, fmt.Sprintf("author-%d", i), false)
 	}
 	f.door.mu.Lock()
 	defer f.door.mu.Unlock()
@@ -3627,16 +3656,15 @@ func TestInjectAReMintedConversationContinuesItsSequence(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, last, _ := f.door.snapshot(key, 0, ""); last != 2 {
-		t.Fatalf("lastSeq before the eviction = %d, want 2", last)
-	}
+	_, before, _ := f.door.snapshot(key, 0, "")
 	f.evictEverything(t, "long-runner")
 	if _, err := f.door.Post(key, "the answer"); err != nil {
 		t.Fatal(err)
 	}
-	entries, last, _ := f.door.snapshot(key, 2, "")
-	if len(entries) != 1 || entries[0].Seq != 3 || last != 3 {
-		t.Fatalf("after the eviction a poller at after=2 sees entries=%+v lastSeq=%d; want the one new post at seq 3", entries, last)
+	entries, last, _ := f.door.snapshot(key, before, "")
+	if len(entries) != 1 || entries[0].Seq != before+1 || last != before+1 {
+		t.Fatalf("after the eviction a poller at after=%d sees entries=%+v lastSeq=%d; want the one new post at seq %d",
+			before, entries, last, before+1)
 	}
 }
 

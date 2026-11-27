@@ -756,6 +756,11 @@ func New(o Options) (*Gateway, error) {
 	if sink, ok := o.Adapter.(TaskLocatorSink); ok {
 		sink.SetTaskLocator(g.reg.LocateDoorTask)
 	}
+	// The record's task list, for a door that rebuilds a conversation it
+	// didn't hold (a handover): see ConversationTasks.
+	if sink, ok := o.Adapter.(ConversationTasksSink); ok {
+		sink.SetConversationTasks(g.conversationTasks)
+	}
 	// The session registry as a read, for an adapter that has to decide on
 	// its own goroutine whether a conversation is one the gateway is in (the
 	// Slack adapter's session-thread rule, and the side door composite in
@@ -1403,6 +1408,31 @@ func (g *Gateway) matchSubmission(ctx context.Context, msg InboundMessage) strin
 		return ref.ID
 	}
 	return ""
+}
+
+// conversationTasks is the ConversationTasks the gateway offers a door: the
+// chain roots a door session's record lists, oldest first, read with
+// nothing changed. A key that isn't a door session's reads as nothing, as
+// does a record filed under another key, so what a door rebuilds from is
+// only ever its own conversation's.
+func (g *Gateway) conversationTasks(ctx context.Context, conversation string) ([]string, error) {
+	if !isDoorSession(conversation) {
+		return nil, nil
+	}
+	rec, err := g.reg.Get(ctx, conversation)
+	if err != nil {
+		return nil, err
+	}
+	if rec == nil || rec.Key != conversation {
+		return nil, nil
+	}
+	var ids []string
+	for _, ref := range rec.Tasks {
+		if rec.doorVisible(ref.ID) {
+			ids = append(ids, ref.ID)
+		}
+	}
+	return ids, nil
 }
 
 // observeSubmissionMatched tells a SubmissionObserver that a turn repeated a

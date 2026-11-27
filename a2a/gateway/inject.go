@@ -298,8 +298,12 @@ const (
 
 // InjectEntry is one line of a conversation's transcript.
 //
-// Seq is per conversation and starts at 1, so a reader polls with the last
-// sequence it saw and can neither miss an entry nor re-read one. MessageID is
+// Seq is per conversation and only rises, so a reader polls with the last
+// sequence it saw and can neither miss an entry nor re-read one. It is a
+// cursor, not a count: a conversation minted while the door serves starts
+// at the door's serving start in Unix milliseconds (InjectAdapter.seqBase),
+// so a cursor a caller carries across a gateway handover stays below
+// everything the next gateway writes (#7456). MessageID is
 // the synthetic backend message id: minted on a post, and on an edit it names
 // the post being rewritten. TaskID and State are set on the two task entries
 // only.
@@ -320,7 +324,11 @@ type InjectEntry struct {
 	// reads the token to tell the executor's own failure (bridge-shutdown,
 	// spawn-failed) from the persona's (hermes-exited-nonzero).
 	Reason string `json:"reason,omitempty"`
-	TS     string `json:"ts"`
+	// Recovered marks an entry the door rebuilt from the session record
+	// and the task's stream, for a conversation it didn't hold (#7456),
+	// rather than one it saw happen.
+	Recovered bool   `json:"recovered,omitempty"`
+	TS        string `json:"ts"`
 }
 
 // injectRequest is the POST /inject body.
@@ -653,6 +661,15 @@ type injectConversation struct {
 	// requester is the author of the last message injected here, which is
 	// the whole membership of a synthetic conversation. Roster returns it.
 	requester string
+	// matched records the tasks the gateway answered a turn with because
+	// the turn repeated a submission the record holds (SubmissionMatched):
+	// the turn started nothing, and the POST waiting on it answers with the
+	// first attempt's task.
+	matched injectIDLog
+	// recovered is whether the door has rebuilt this conversation from the
+	// session record (recoverConversation), or minted it on a POST that
+	// had just done so. Once per minting.
+	recovered bool
 }
 
 // InjectAdapter is the inject backend: an HTTP listener whose POST is an
@@ -721,6 +738,18 @@ type InjectAdapter struct {
 	// ProbeSink. Nil on a door run outside a gateway, where the read route
 	// reports that it could not look.
 	probe ConversationProbe
+	// tasks is the gateway's ConversationTasks, handed over in New through
+	// ConversationTasksSink, read like probe. Nil outside a gateway, where
+	// nothing is rebuilt.
+	tasks ConversationTasks
+	// recovering holds a channel per key whose rebuild is under way, closed
+	// when it ends, so two requests racing on one key don't both rebuild.
+	recovering map[string]chan struct{}
+	// seqBase is the sequence a conversation minted with no floor starts
+	// at: the door's serving start in Unix milliseconds, set by Run and
+	// never lowered (InjectEntry.Seq). Zero before Run, so a door outside a
+	// gateway numbers from 1. Run starts nextID's count there too.
+	seqBase int
 
 	// listener, when set, is an already-bound listener Run serves on instead
 	// of binding listen. Test injection only; the deployed adapter always
@@ -755,6 +784,7 @@ func NewInjectAdapter(listen, token string, firstEventGrace time.Duration, log *
 		directOf:        map[string]string{},
 		floors:          map[string]injectFloor{},
 		submissions:     map[string]*injectSubmission{},
+		recovering:      map[string]chan struct{}{},
 		notify:          make(chan struct{}),
 	}, nil
 }
@@ -805,6 +835,14 @@ func (a *InjectAdapter) SetProbe(probe ConversationProbe) {
 
 // Run serves the endpoints until ctx is done.
 func (a *InjectAdapter) Run(ctx context.Context, handler func(InboundMessage)) error {
+	a.mu.Lock()
+	a.seqBase = max(a.seqBase, int(time.Now().UnixMilli()))
+	// Message ids count on from the same base, so a post this gateway
+	// makes never reuses an id an earlier gateway minted on the same
+	// conversation: a caller that saw that id edited would take the new
+	// post for the rolling line and miss the answer (#7456).
+	a.nextID = max(a.nextID, a.seqBase)
+	a.mu.Unlock()
 	a.handlerMu.Lock()
 	a.handler = handler
 	a.handlerMu.Unlock()
@@ -1224,7 +1262,8 @@ func (a *InjectAdapter) rememberFloorLocked(key string, floor injectFloor) {
 }
 
 // floorLocked is where a conversation minted under key starts: where its
-// evicted predecessor stopped, or at sequence 1 with nothing handed over. The
+// evicted predecessor stopped, or at the serving base (seqBase, 1 before Run)
+// with nothing handed over. The
 // floor is left in place rather than consumed, so the bound above stays by
 // eviction order; the next eviction of the key overwrites it. Caller holds
 // a.mu.
@@ -1232,7 +1271,7 @@ func (a *InjectAdapter) floorLocked(key string) injectFloor {
 	if floor, ok := a.floors[key]; ok {
 		return floor
 	}
-	return injectFloor{nextSeq: 1}
+	return injectFloor{nextSeq: max(1, a.seqBase)}
 }
 
 // appendLocked stamps and stores one entry, then wakes every waiting reader.
@@ -1283,6 +1322,7 @@ type injectCounts struct {
 	turns            int
 	cancelsPublished int
 	queued           int
+	matched          int
 	// gen is the conversation's mint generation; see injectConversation.gen.
 	// Zero when the conversation did not exist when the counts were read.
 	gen int
@@ -1299,6 +1339,7 @@ func countsOf(conv *injectConversation) injectCounts {
 		turns:            conv.turns,
 		cancelsPublished: conv.cancelsPublished,
 		queued:           conv.queued,
+		matched:          conv.matched.total,
 		gen:              conv.gen,
 	}
 }
@@ -1337,6 +1378,9 @@ type injectTurn struct {
 	// the position has been evicted from the log (injectIDLog.at).
 	accepted, failed, started string
 	acceptedGone, failedGone  bool
+	// matched is the first task past prior's count that the gateway
+	// answered a repeated submission with (SubmissionMatched), or "".
+	matched string
 }
 
 // turnSince is the conversation's state since prior, read at once.
@@ -1354,6 +1398,7 @@ func (a *InjectAdapter) turnSince(key string, prior injectCounts) injectTurn {
 	turn.accepted, turn.acceptedGone = conv.accepted.at(prior.accepted)
 	turn.failed, turn.failedGone = conv.publishFailed.at(prior.publishFailed)
 	turn.started, _ = conv.started.at(prior.starts)
+	turn.matched, _ = conv.matched.at(prior.matched)
 	return turn
 }
 
@@ -1531,12 +1576,16 @@ func (a *InjectAdapter) handleInject(w http.ResponseWriter, r *http.Request) {
 		defer a.completeSubmission(sub, "",
 			"the first POST with this message id aborted before its turn answered", injectRefusalNoAnswer)
 	}
+	// A conversation an earlier gateway held is rebuilt first, so the turn
+	// lands on its history and a repeat of a submission it holds is
+	// answered with a task this door can show.
+	recovered := a.recoverConversation(turnCtx, key)
 	// Recorded before the turn, so Roster answers for this conversation even
 	// if the gateway reads it inside handleInbound. It also mints the
 	// conversation, which is why it comes before the counts: read from a
 	// conversation that exists, they carry its generation, and the wait can
 	// tell an eviction under it from a turn that did nothing.
-	a.noteRequester(key, req.Author)
+	a.noteRequester(key, req.Author, recovered)
 	// Read the counters BEFORE handing the message over, and only once no
 	// earlier turn is still running, so the wait below cannot mistake a
 	// previous turn's task or reply for this one's.
@@ -1567,6 +1616,9 @@ func (a *InjectAdapter) handleInject(w http.ResponseWriter, r *http.Request) {
 		Intent:       req.Intent,
 		Profile:      req.Profile,
 		Parameters:   req.Parameters,
+		// The durable dedupe's key, over the caller's own id only: a minted
+		// id can't repeat (injectSubmissionKey).
+		SubmissionKey: injectSubmissionKey(key, req.MessageID, req.Intent, req.Profile, req.Text),
 		// Stamped rather than inferred: this door can be armed beside a real
 		// backend, and the authority block has to name the door the message
 		// came through rather than the backend the process was configured
@@ -1582,7 +1634,14 @@ func (a *InjectAdapter) handleInject(w http.ResponseWriter, r *http.Request) {
 		a.log.Info("inject: the door started nothing for a POST",
 			"conversation", key, "messageId", messageID, "refusal", refusal, "note", note)
 	}
-	entries, _, _ := a.snapshot(key, prior.entries, "")
+	matched := note == injectMatchedNote
+	since := prior.entries
+	if matched {
+		// The answer is an earlier attempt's, so the whole transcript, as an
+		// in-memory duplicate is answered (answerDuplicate).
+		since = 0
+	}
+	entries, _, _ := a.snapshot(key, since, "")
 	writeJSON(w, http.StatusOK, injectResponse{
 		Conversation:           key,
 		TaskID:                 taskID,
@@ -1592,16 +1651,22 @@ func (a *InjectAdapter) handleInject(w http.ResponseWriter, r *http.Request) {
 		Note:                   note,
 		Refusal:                refusal,
 		FirstEventGraceSeconds: int(a.firstEventGrace / time.Second),
+		Deduplicated:           matched,
 	})
 }
 
 // noteRequester records who is talking on a conversation, for Roster and
-// OpenDirect.
-func (a *InjectAdapter) noteRequester(key, author string) {
+// OpenDirect. recovered is whether the request has just rebuilt the
+// conversation from its record (or found nothing to rebuild), so the mint
+// here needn't be rebuilt again.
+func (a *InjectAdapter) noteRequester(key, author string, recovered bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	conv := a.conversationLocked(key)
 	conv.requester = author
+	if recovered {
+		conv.recovered = true
+	}
 	a.noteDirectLocked(author, key)
 }
 
@@ -1680,7 +1745,7 @@ func (a *InjectAdapter) handleCancel(w http.ResponseWriter, r *http.Request, key
 		messageID = injectInboundIDPrefix + randHex(messageIDHexWidth)
 	}
 	// Requester first, then the claim, for the reasons handleInject gives.
-	a.noteRequester(key, req.Author)
+	a.noteRequester(key, req.Author, false)
 	deadline := time.Now().Add(injectSubmitWait)
 	// The claim is taken on a context the client cannot end: a caller that
 	// gives up while an earlier turn is still running has still asked for
@@ -1818,6 +1883,12 @@ func (a *InjectAdapter) awaitTurn(ctx context.Context, key string, prior injectC
 		}
 		if turn.accepted != "" {
 			return turn.accepted, "", ""
+		}
+		if turn.matched != "" {
+			// The turn repeated a submission the record holds, and the
+			// gateway started nothing: the first attempt's task is the
+			// answer, as an in-memory duplicate's is (answerDuplicate).
+			return turn.matched, injectMatchedNote, ""
 		}
 		if turn.failed != "" {
 			return "", fmt.Sprintf("the gateway minted task %s and could not put it on the bus; "+
@@ -1973,6 +2044,9 @@ func (a *InjectAdapter) handleConversation(w http.ResponseWriter, r *http.Reques
 		injectError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// A conversation an earlier gateway held is rebuilt before it is read,
+	// so a caller following `after` from that gateway reads on.
+	a.recoverConversation(r.Context(), key)
 	var probed *probeReport
 	if probeAsked != 0 {
 		probed = a.runProbe(r.Context(), key, taskID, chainUsage)
